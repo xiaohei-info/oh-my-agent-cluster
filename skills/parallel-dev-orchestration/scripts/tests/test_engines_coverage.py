@@ -280,10 +280,42 @@ class TestCreateEngineFromConfig:
 
 
 class TestCreateEngineFromEnv:
-    def test_env_path_not_exist_raises_runtime(self, tmp_path):
+    _KEYS = ("ENGINE_TYPE", "MULTICA_WORKSPACE_ID", "GITHUB_REPO",
+             "MOCK_WORKSPACE_ID", "ORCH_GIT_SYNC")
+
+    def test_env_path_optional_missing_falls_back(self, tmp_path, monkeypatch):
+        """.env 可选：不存在不再报错；无任何配置时回退默认引擎且 workspace 空 -> 报缺 workspace。"""
+        for k in self._KEYS:
+            monkeypatch.delenv(k, raising=False)
         missing = tmp_path / "no-such.env"
-        with pytest.raises(RuntimeError, match=r"\.env 文件不存在"):
+        with pytest.raises(RuntimeError, match=r"缺少 workspace"):
             create_engine_from_env(missing)
+
+    def test_no_dotenv_with_engine_override_ok(self, tmp_path, monkeypatch):
+        """无 .env，但命令行 --engine mock 覆盖 -> mock 有默认 workspace，正常建。"""
+        for k in self._KEYS:
+            monkeypatch.delenv(k, raising=False)
+        eng = create_engine_from_env(tmp_path / "none.env", engine_type="mock")
+        assert eng.config.engine_type == "mock"
+
+    def test_cli_workspace_overrides_dotenv(self, tmp_path, monkeypatch):
+        """命令行 --workspace 覆盖 .env 里的 workspace。"""
+        for k in self._KEYS:
+            monkeypatch.delenv(k, raising=False)
+        env = tmp_path / ".env"
+        env.write_text("ENGINE_TYPE=multica\nMULTICA_WORKSPACE_ID=from-file\n")
+        eng = create_engine_from_env(env, workspace_id="from-cli")
+        assert eng.config.workspace_id == "from-cli"
+
+    def test_export_overrides_dotenv(self, tmp_path, monkeypatch):
+        """进程环境(export) 优先于 .env 文件。"""
+        for k in self._KEYS:
+            monkeypatch.delenv(k, raising=False)
+        env = tmp_path / ".env"
+        env.write_text("ENGINE_TYPE=mock\nMOCK_WORKSPACE_ID=from-file\n")
+        monkeypatch.setenv("MOCK_WORKSPACE_ID", "from-export")
+        eng = create_engine_from_env(env)
+        assert eng.config.workspace_id == "from-export"
 
     def test_parses_mock_env(self, tmp_path):
         env = tmp_path / ".env"

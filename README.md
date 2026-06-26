@@ -79,29 +79,36 @@ cd parallel-dev-skills
 
 ## 配置编排引擎
 
-orchestration skill 通过 skill 目录下的 `.env` 选择协作平台。两种生成方式：
+**配置只放非敏感的「配置项」（engine 类型、workspace、squad）；认证交给各 CLI 自己管理**
+（github 用 `gh auth login`，multica 用其自身登录）——不要把 token 写进配置。
 
-### A. 交互式向导
+配置面统一为「环境变量」，有三种给法，优先级 **低 → 高**：
 
-```bash
-cd <skills-dir>/parallel-dev-orchestration
-python3 scripts/setup.py        # 选引擎、按提示填变量，自动写出 .env
+```
+.env 文件（可选）  <  进程环境变量（export）  <  命令行参数（--engine / --workspace）
 ```
 
-### B. 手动复制示例
+- `.env` **可选**：存在就加载，不存在不报错。适合持久化 workspace/squad 这类常用值。
+- `export`：覆盖 `.env`，适合临时切换。
+- `--engine/--workspace`：覆盖一切，最显式。
+- **缺必填项**（engine 的 workspace）→ 报清晰错误，直接告诉你设哪个环境变量或传哪个参数。
 
 ```bash
 cd <skills-dir>/parallel-dev-orchestration
-cp .env.example .env            # 编辑 .env，只保留所选引擎的配置
+
+# 任选其一即可：
+python3 scripts/setup.py                                  # A. 向导生成 .env
+cp .env.example .env                                      # B. 手填 .env
+python3 scripts/run_dag.py m.yaml --engine multica --workspace <ws>   # C. 纯命令行，不用 .env
 ```
 
 ### 三种引擎与所需配置
 
-| 引擎 | `ENGINE_TYPE` | 必需变量 | 前置依赖 |
+| 引擎 | `ENGINE_TYPE` | 必需配置（env 或 `--workspace`） | 认证（不在配置面） |
 |---|---|---|---|
-| **Mock** | `mock` | `MOCK_WORKSPACE_ID`（任意串） | 无——本地空跑，先验证机制 |
-| **GitHub** | `github` | `GITHUB_REPO=owner/repo`，`GITHUB_TOKEN`（建议） | 已安装并登录 `gh` CLI |
-| **Multica** | `multica` | `MULTICA_WORKSPACE_ID`（`MULTICA_SQUAD_ID` 可选） | 已安装并登录 `multica` CLI |
+| **Mock** | `mock` | `MOCK_WORKSPACE_ID`（任意串，有默认） | 无——本地空跑 |
+| **GitHub** | `github` | `GITHUB_REPO=owner/repo` | `gh auth login`（gh 管 token） |
+| **Multica** | `multica` | `MULTICA_WORKSPACE_ID`（`MULTICA_SQUAD_ID` 可选） | `multica` 自身登录（`~/.multica`） |
 
 > work item 在 GitHub 下即 GitHub Issue，在 Multica 下即 Multica issue。manifest 里 `worker:` / `reviewer:` 填的 Agent 名必须真实存在于该 workspace/squad 的成员池。
 
@@ -119,16 +126,15 @@ cp .env.example .env            # 编辑 .env，只保留所选引擎的配置
 
 ### GitHub —— issue 即 GitHub Issue
 引导用户：
-- [ ] **安装并登录 `gh` CLI**：`gh auth login`（或备好 `GITHUB_TOKEN`）。
+- [ ] **登录 `gh` CLI 管认证**：`gh auth login`（token 由 gh 自己保管，**不写进配置/.env**）。
 - [ ] **确认目标仓库**：`GITHUB_REPO=owner/repo`，且账号对该仓有 **issue 读写权限**。
-- [ ] **（建议）配 `GITHUB_TOKEN`**：提高 API 限额，scope 需含 `repo`。
 - [ ] **worker/reviewer 名 = 仓库可 assign 的 GitHub 用户名**——manifest 里写的名字必须是该仓能被指派 issue 的协作者/成员，否则派发失败。
 - [ ] **确认集成分支存在**（manifest 的 `integration_branch`），PR 以它为 base。
-- 写进 `.env`：`ENGINE_TYPE=github` / `GITHUB_REPO=...` /（可选）`GITHUB_TOKEN=...`
+- 配置：`ENGINE_TYPE=github` + `GITHUB_REPO=...`（`.env` / `export` / `--workspace owner/repo` 任一）
 
 ### Multica —— issue 即 Multica issue
 引导用户：
-- [ ] **安装并登录 `multica` CLI**，确认 `multica` 在 PATH。
+- [ ] **登录 `multica` CLI 管认证**，确认 `multica` 在 PATH（认证存 `~/.multica`，**不写进配置/.env**）。
 - [ ] **拿 workspace id**：`multica workspace list` → 填 `MULTICA_WORKSPACE_ID`。
 - [ ] **拿 squad id**：`multica squad list`（或 `multica squad member list <squad-id>` 核对成员）。squad **不写死在文件里**，用环境变量驱动（见下「id 用环境变量驱动」）。
 - [ ] **在小队里给每个 Agent 配好角色**：`worker` / `reviewer` / `architect`（编排者据此挑选——把擅长后端的 worker、专职评审的 reviewer 放到对应卡）。
@@ -136,7 +142,7 @@ cp .env.example .env            # 编辑 .env，只保留所选引擎的配置
 
 > **关于「为什么 manifest 里是 agent 名而不是 role」**：引擎按**名字**在 squad 成员池里校验与派发（`multica squad member list` 取成员名）。role 是**编排者选人的依据**——你按角色挑出合适的 agent，再把它的**名字**写进 `worker`/`reviewer` 字段。所以「在平台上配好角色」与「manifest 里写名字」二者配合：角色帮你选对人，名字是实际派发句柄。
 
-- 写进 `.env`：`ENGINE_TYPE=multica` / `MULTICA_WORKSPACE_ID=...` /（可选）`MULTICA_SQUAD_ID=...`
+- 配置：`ENGINE_TYPE=multica` + `MULTICA_WORKSPACE_ID=...`（`.env` / `export` / `--workspace <id>` 任一；`MULTICA_SQUAD_ID` 可选）
 
 ### id 用环境变量驱动（不必手改文件）
 

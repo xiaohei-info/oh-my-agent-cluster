@@ -8,7 +8,6 @@ DAG 编排引擎 - manifest 驱动
   3. DISPATCH: fire-and-forget 派发所有 ready 节点（建 work item -> assign -> 标 in_progress，不阻塞）
   4. 终止:    无 ready 且无在飞 -> 带报告退出
 """
-import os
 import sys
 import time
 import argparse
@@ -22,7 +21,6 @@ from utils import commit_manifest, git_sync_enabled
 
 from engines import (
     create_engine_from_env,
-    create_engine_from_config,
     CollaborationEngine,
     WorkItemStatus,
 )
@@ -299,21 +297,12 @@ def execute_dag(
 
 # ==================== 主流程 ====================
 
-def _bridge_runtime_env(engine):
-    """把 .env 里的运行时开关桥接进进程环境，使 `.env` 与 `export` 两条路一致。
+def start_new_run(manifest_path: str, engine: CollaborationEngine = None, max_parallel: int = 4,
+                  *, engine_type: str = None, workspace_id: str = None):
+    """启动新的编排：load -> lint -> reconcile -> execute_dag。
 
-    引擎配置走 .env（读进 config.extra），但 git_sync_enabled() 等读 os.environ；
-    不桥接的话，`.env` 里写 ORCH_GIT_SYNC=1 不生效，只有 export 才行。
-    已显式 export 的优先（不覆盖）。
+    engine 为 None 时按「环境变量为唯一面」解析配置（.env 可选 + 命令行覆盖）。
     """
-    for key in ("ORCH_GIT_SYNC",):
-        val = engine.config.extra.get(key)
-        if val is not None and key not in os.environ:
-            os.environ[key] = str(val)
-
-
-def start_new_run(manifest_path: str, engine: CollaborationEngine = None, max_parallel: int = 4):
-    """启动新的编排：load -> lint -> reconcile -> execute_dag。"""
     print(f"=== 加载 manifest: {manifest_path} ===")
     manifest = load_manifest(manifest_path)
 
@@ -324,8 +313,7 @@ def start_new_run(manifest_path: str, engine: CollaborationEngine = None, max_pa
 
     if engine is None:
         print("=== 初始化引擎 ===")
-        engine = create_engine_from_env()
-        _bridge_runtime_env(engine)
+        engine = create_engine_from_env(engine_type=engine_type, workspace_id=workspace_id)
         print(f"  引擎类型: {engine.__class__.__name__}")
         print(f"  工作空间: {engine.config.workspace_id}")
         print(f"  小队: {squad_id}")
@@ -383,12 +371,13 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    engine = None
-    if args.engine and args.workspace:
-        print(f"=== 使用指定引擎: {args.engine} ===")
-        engine = create_engine_from_config(args.engine, args.workspace)
-
-    start_new_run(args.manifest, engine=engine, max_parallel=args.max_parallel)
+    # 配置统一走 create_engine_from_env：.env(可选) < 进程环境 < 命令行参数
+    start_new_run(
+        args.manifest,
+        max_parallel=args.max_parallel,
+        engine_type=args.engine,
+        workspace_id=args.workspace,
+    )
 
 
 if __name__ == "__main__":

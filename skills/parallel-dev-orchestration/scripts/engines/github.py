@@ -26,7 +26,11 @@ class GithubEngine(CollaborationEngine):
 
     @classmethod
     def get_required_env_vars(cls) -> List[Dict[str, str]]:
-        """GitHub 引擎需要的环境变量"""
+        """GitHub 引擎需要的配置项（仅非敏感配置）。
+
+        认证不在此配置：用 `gh auth login` 让 gh CLI 自己管理 token。
+        （若环境里已有 GITHUB_TOKEN，引擎会透传给 gh，但不在向导里索取。）
+        """
         return [
             {
                 'name': 'GITHUB_REPO',
@@ -34,12 +38,6 @@ class GithubEngine(CollaborationEngine):
                 'prompt': '请输入 GitHub 仓库 (例如: microsoft/vscode)',
                 'validator': lambda x: '/' in x and len(x.split('/')) == 2
             },
-            {
-                'name': 'GITHUB_TOKEN',
-                'description': 'GitHub Personal Access Token (可选，提高 API 限额)',
-                'prompt': '请输入 GitHub Token (可选，直接回车跳过)',
-                'default': '',
-            }
         ]
 
     @classmethod

@@ -504,6 +504,8 @@ manifest 文件是全局唯一口径——不依赖 checkpoint、Run 存储、ev
 - 中间 status 只写本地文件不提交
 - push 失败醒目告警但不中断编排；不自动 merge（PR 评审是外部门控）
 
+> **git 回写开关（`ORCH_GIT_SYNC`，默认关）**：上述 commit+push 默认**关闭**——只在本地写 manifest 文件，不碰 git，避免装完试跑/单机/CI 时污染业务仓。真实跨机器协作（manifest 落在项目 `.orchestrator/` 受版本管理）时 `export ORCH_GIT_SYNC=1` 打开。关闭状态下 manifest 仍以本地文件为口径，单机断点续跑不受影响；只有「跨机器经 git 流转」依赖打开它。引擎启动会打印当前开/关状态。
+
 ### reconcile（跨机器接力）
 
 manifest 经 git 流转，可能是别的机器 commit 来的、带部分状态。因此 Phase 2 启动时做一次全局 reconcile：逐节点拿 `work_item_id` 去平台核对真实状态 vs manifest 记录，补齐 gap，再继续跑。manifest 是口径，平台是实况，二者对齐后才往下跑。

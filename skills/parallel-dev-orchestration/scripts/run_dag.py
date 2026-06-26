@@ -17,7 +17,7 @@ from typing import Set
 sys.path.insert(0, str(Path(__file__).parent))
 
 from core import load_manifest, save_manifest, set_node, lint, frontier, downstream_of
-from utils import commit_manifest
+from utils import commit_manifest, git_sync_enabled
 
 from engines import (
     create_engine_from_env,
@@ -315,6 +315,7 @@ def start_new_run(manifest_path: str, engine: CollaborationEngine = None, max_pa
         print(f"  工作空间: {engine.config.workspace_id}")
         print(f"  小队: {squad_id}")
         print(f"  轮询间隔: {engine.config.polling_interval}s")
+        print(f"  git 回写: {'开（ORCH_GIT_SYNC）' if git_sync_enabled() else '关（默认，仅本地写文件，不 commit/push）'}")
 
     engine.config.squad_id = squad_id
 

@@ -130,26 +130,50 @@ cp .env.example .env            # 编辑 .env，只保留所选引擎的配置
 引导用户：
 - [ ] **安装并登录 `multica` CLI**，确认 `multica` 在 PATH。
 - [ ] **拿 workspace id**：`multica workspace list` → 填 `MULTICA_WORKSPACE_ID`。
-- [ ] **拿 squad id**：`multica squad list`（或 `multica squad member list <squad-id>` 核对成员）。squad **不写死在文件里**，见下方「squad/id 用环境变量驱动」。
-- [ ] **确认成员池**：manifest 里每个 `worker:` / `reviewer:` 必须是该 **squad 的真实成员 Agent**；reviewer ≠ worker。
+- [ ] **拿 squad id**：`multica squad list`（或 `multica squad member list <squad-id>` 核对成员）。squad **不写死在文件里**，用环境变量驱动（见下「id 用环境变量驱动」）。
+- [ ] **在小队里给每个 Agent 配好角色**：`worker` / `reviewer` / `architect`（编排者据此挑选——把擅长后端的 worker、专职评审的 reviewer 放到对应卡）。
+- [ ] **确认成员池**：manifest 里每个 `worker:` / `reviewer:` 填的是 **agent 名**，且必须是该 squad 的真实成员；reviewer ≠ worker。
+
+> **关于「为什么 manifest 里是 agent 名而不是 role」**：引擎按**名字**在 squad 成员池里校验与派发（`multica squad member list` 取成员名）。role 是**编排者选人的依据**——你按角色挑出合适的 agent，再把它的**名字**写进 `worker`/`reviewer` 字段。所以「在平台上配好角色」与「manifest 里写名字」二者配合：角色帮你选对人，名字是实际派发句柄。
+
 - 写进 `.env`：`ENGINE_TYPE=multica` / `MULTICA_WORKSPACE_ID=...` /（可选）`MULTICA_SQUAD_ID=...`
 
-### squad / id 用环境变量驱动（不必手改文件）
+### id 用环境变量驱动（不必手改文件）
 
-manifest 的字段支持 **`${ENV_VAR:-默认值}`** 展开。这样 id 不必硬写进文件——
+manifest 的字段支持 **`${ENV_VAR:-默认值}`** 展开。这样 squad / 仓库标识等 id 不必硬写进文件——
 用户设环境变量即可，未设则用默认值（mock 下开箱即跑）：
 
 ```yaml
 meta:
-  squad: "${MULTICA_TEST_SQUAD:-mock-squad}"   # 真实运行：export MULTICA_TEST_SQUAD=<你的squad>
+  squad: "${ORCH_SQUAD:-mock-workspace}"   # 真实运行：export ORCH_SQUAD=<你的squad>
 ```
 
-- 未设环境变量 → 取默认 `mock-squad`（mock 引擎不校验成员，直接跑）。
-- `export MULTICA_TEST_SQUAD=<squad-id>` 后重跑 → 自动展开为真实 squad，**无需编辑 manifest**。
+- 未设环境变量 → 取默认 `mock-workspace`（mock 引擎不校验成员，直接跑）。
+- `export ORCH_SQUAD=<squad-id>` 后重跑 → 自动展开为真实 squad，**无需编辑 manifest**。
 - 变量未设且无默认值（`${FOO}`）→ 保留原样，便于一眼看出"这里还没配"。
 
 > 这条机制就是为了避免「committed 文件里留个占位符、别人不知道要替换」——
 > 看到 `${VAR}` 即知"设这个环境变量"，自解释。
+
+### git 回写开关（`ORCH_GIT_SYNC`，默认关）
+
+引擎以 manifest 为唯一口径，跨机器协作时靠 **git commit + push** 流转状态。但这一步
+**默认关闭**，避免你第一次装完跑测试 / demo 时往业务项目仓库塞 commit：
+
+| `ORCH_GIT_SYNC` | 行为 | 适用 |
+|---|---|---|
+| 未设 / `0` / `false`（默认） | 只在本地写 manifest 文件，**不 `git add/commit/push`** | 首次试跑、单机、mock/demo、CI |
+| `1` / `true` / `yes` / `on` | 状态变更回写并 `git commit`（有远程则 `push`） | **真实跨机器协作**：manifest 落在项目 `.orchestrator/`、受版本管理 |
+
+```bash
+# 真实项目里开启跨机器口径同步：
+export ORCH_GIT_SYNC=1
+python3 scripts/run_dag.py .orchestrator/<name>.yaml
+```
+
+> 引擎启动时会打印「git 回写: 开/关」当前状态，便于确认。无论开关如何，manifest
+> 文件本身都会被写状态——故跑 demo 仍建议用临时副本（见下方快速开始），别直接对
+> committed 样例跑。
 
 ---
 
@@ -175,9 +199,9 @@ python3 scripts/run_dag.py /tmp/demo.yaml
 引擎会自动 lint → reconcile → 建 work item → 算 frontier → 派发 → 轮询到终态 → 写回状态。
 mock 引擎预置成员 `alice/bob/charlie`，样例的 `worker/reviewer` 用的就是它们，开箱即跑（3 节点 100% 完成）。看懂流程后，再切到 github/multica 跑真任务。
 
-> 注：引擎以 manifest 为唯一口径，会把状态回写并 `git commit`（无远程时仅告警不中断）。
-> 真实使用时 manifest 落在你项目的 `.orchestrator/<name>.yaml`，本就该被版本管理；
-> 跑 demo 用 `/tmp` 副本即可，不影响本仓。
+> 注：引擎以 manifest 为唯一口径，会把状态**回写进 manifest 文件**。git 提交默认**关闭**
+> （`ORCH_GIT_SYNC` 未开），所以不会污染仓库历史；但文件本身仍会被改写，故 demo 用 `/tmp`
+> 副本，不动 committed 样例。真实跨机器协作再开 `ORCH_GIT_SYNC=1`（见上「git 回写开关」）。
 
 ---
 

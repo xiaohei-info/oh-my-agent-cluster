@@ -47,7 +47,7 @@ parallel-dev-skills/
 把两个 skill 装进目标 Agent 的 skills 目录：
 
 ```bash
-git clone <this-repo> parallel-dev-skills
+git clone https://github.com/xiaohei-info/parallel-dev-skills.git
 cd parallel-dev-skills
 
 # 默认装到 ~/.claude/skills（复制模式）

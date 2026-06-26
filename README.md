@@ -22,6 +22,7 @@
 ```
 parallel-dev-skills/
 ├── README.md                 # 本文件（安装/配置指南）
+├── AGENTS.md                 # 配套通用工作规范（合并进你项目的 AGENTS.md/CLAUDE.md）
 ├── LICENSE                   # MIT
 ├── scripts/install.sh        # 安装脚本：把 skills 复制/软链进 Agent 的 skills 目录
 └── skills/
@@ -33,7 +34,7 @@ parallel-dev-skills/
     │       ├── setup.py      # 交互式配置向导（生成 .env）
     │       ├── core/         # manifest / graph(frontier) / lint
     │       ├── engines/      # mock / github / multica 适配
-    │       └── tests/        # 107 passed 的测试套件
+    │       └── tests/        # 116 passed 的测试套件
     └── parallel-dev-executor/
         └── SKILL.md          # worker/reviewer 执行协议
 ```
@@ -232,6 +233,27 @@ mock 引擎预置成员 `alice/bob/charlie`，样例的 `worker/reviewer` 用的
 6. **收尾**：汇总 digest（PR 列表、验收状态、遗留问题）。
 
 被派到任务的 worker / reviewer Agent 则加载 `parallel-dev-executor` skill，按执行协议 TDD 实现并产出可评审 PR。
+
+---
+
+## 配套通用规范（[AGENTS.md](./AGENTS.md)）
+
+两个 skill 定义的是「**怎么编排**」与「**怎么执行**」的协议；要让一群 Agent 在并行开发中
+**不跑偏**，还需要一组**常驻护栏**——全局工作纪律必须放进「每次都会被加载」的文件里
+（`AGENTS.md` / `CLAUDE.md`），而不是埋在长文档中。这正是编排 skill 防跑偏模型的一环。
+
+本仓自带这份通用底稿：[`AGENTS.md`](./AGENTS.md)（项目无关，只含工程纪律：契约先行 /
+先规划后实现 / 测试同步 / 完成需证据 / 根因调试 / 代码品味准则）。
+
+**怎么用**（三选一，详见 `AGENTS.md` 文末）：
+
+1. **合并（推荐）**：把 `AGENTS.md` 的工作纪律整合进你项目**已有的 `AGENTS.md` / `CLAUDE.md`**，
+   与你的业务专属约束（架构边界、领域规则）并列。这样 worker/reviewer 每次加载即受同一套约束。
+2. **引用**：在你项目的 `AGENTS.md` 顶部加一行指针，指向本文件。
+3. **直接放置**：项目还没有 `AGENTS.md` 时，拷到项目根作起点，再叠加业务约束。
+
+> 边界：`AGENTS.md` 只放**通用工程纪律**；项目专属口径（架构分层、技术选型、领域模型、
+> 权限角色、部署）仍写在你自己的 `AGENTS.md` 里，不要塞进这份通用底稿。
 
 ---
 

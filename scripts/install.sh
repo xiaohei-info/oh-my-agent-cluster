@@ -59,3 +59,5 @@ echo
 echo "完成。下一步："
 echo "  1) 配置编排引擎：cd \"$TARGET/parallel-dev-orchestration\" && python3 scripts/setup.py"
 echo "  2) 在你的 Agent 里加载 skill 'parallel-dev-orchestration' 开始编排。"
+echo "  3) 把配套通用规范合并进你项目的 AGENTS.md / CLAUDE.md："
+echo "     $REPO_ROOT/AGENTS.md （契约先行 / 完成需证据 / 根因调试 等常驻护栏）"

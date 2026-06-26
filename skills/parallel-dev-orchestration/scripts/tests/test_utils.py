@@ -1,4 +1,5 @@
 # commit_manifest real-git-path tests via tmp_path, no mock.
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -99,3 +100,30 @@ def test_sync_toggle_truthy_values(monkeypatch):
     for v in ("0", "false", "off", "", "no"):
         monkeypatch.setenv("ORCH_GIT_SYNC", v)
         assert git_sync_enabled() is False, v
+
+
+# ==================== conftest: .env 自动补全 live 测试变量 ====================
+def test_conftest_loads_only_live_keys_from_dotenv(tmp_path, monkeypatch):
+    """conftest 仅把 MULTICA_WORKSPACE_ID/MULTICA_TEST_SQUAD 从 .env 载入 os.environ；
+    不泄漏 ENGINE_TYPE/token 等其它键（保护用例隔离）。已 export 的优先。"""
+    import conftest
+
+    env = tmp_path / ".env"
+    env.write_text(
+        "ENGINE_TYPE=multica\n"
+        "MULTICA_WORKSPACE_ID=ws-123\n"
+        "MULTICA_TEST_SQUAD=squad-xyz\n"
+        "GITHUB_TOKEN=should-not-load\n"
+    )
+    for k in ("MULTICA_WORKSPACE_ID", "MULTICA_TEST_SQUAD", "ENGINE_TYPE", "GITHUB_TOKEN"):
+        monkeypatch.delenv(k, raising=False)
+
+    conftest._load_live_env_from_dotenv(env)
+    try:
+        assert os.environ.get("MULTICA_WORKSPACE_ID") == "ws-123"
+        assert os.environ.get("MULTICA_TEST_SQUAD") == "squad-xyz"
+        assert os.environ.get("ENGINE_TYPE") is None      # 不泄漏
+        assert os.environ.get("GITHUB_TOKEN") is None      # 不泄漏
+    finally:
+        for k in ("MULTICA_WORKSPACE_ID", "MULTICA_TEST_SQUAD"):
+            os.environ.pop(k, None)

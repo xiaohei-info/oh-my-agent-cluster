@@ -2,8 +2,10 @@
 Live MulticaEngine 测试 —— 直接对真 multica CLI 验证命令面。
 
 Gating:
-- 需同时满足：multica CLI 在 PATH，且显式设置 `MULTICA_WORKSPACE_ID` + `MULTICA_TEST_SQUAD`。
+- 需同时满足：multica CLI 在 PATH，且 `MULTICA_WORKSPACE_ID` + `MULTICA_TEST_SQUAD` 已就绪。
 - 任一缺失即 skip（开源仓库不携带任何私有 workspace/squad 默认值）。
+- 持久开启：把这两个变量写进 skill 根的 `.env`（gitignored），conftest 会在每次 pytest
+  启动时自动读进环境——「第一次」填一次，以后每次都自动带上，无需反复 export。
 
 测试间隔离：每个 test 用唯一 dag_key 前缀（test_live_<func>_<timestamp>），收尾用
 `multica issue status <id> cancelled` 把创建的 issue 标取消（不删，留审计痕）。

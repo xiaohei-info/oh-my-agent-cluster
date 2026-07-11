@@ -30,11 +30,11 @@ class _HelpOnErrorParser(argparse.ArgumentParser):
         type(self)._active_namespace = namespace
         return super().parse_args(invocation, namespace)
 
-    def _parse_known_args(self, arg_strings, namespace):
+    def _parse_known_args(self, arg_strings, namespace, *extra):
         """记录 argparse 的实际 parser 与已解析 Namespace,不重复解释 argv。"""
         type(self)._active_parser = self
         type(self)._active_namespace = namespace
-        return super()._parse_known_args(arg_strings, namespace)
+        return super()._parse_known_args(arg_strings, namespace, *extra)
 
     def error(self, message):
         target = type(self)._active_parser or self

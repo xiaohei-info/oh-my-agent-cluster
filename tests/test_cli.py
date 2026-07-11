@@ -1,5 +1,6 @@
 """cli:退出码契约、help、guide、config get/set、stub 行为。"""
 import json
+import inspect
 import os
 
 import pytest
@@ -13,6 +14,12 @@ def test_no_args_prints_help_exit_ok(capsys):
     out = capsys.readouterr().out
     for group in ("CORE", "WORK", "SETUP", "GUIDE", "WEB"):
         assert group in out
+
+
+def test_parser_internal_hook_accepts_python_patch_version_arguments():
+    parser = build_parser()
+    parameters = inspect.signature(parser._parse_known_args).parameters.values()
+    assert any(param.kind is inspect.Parameter.VAR_POSITIONAL for param in parameters)
 
 
 def test_work_and_guide_help_have_explicit_agent_audience(capsys):

@@ -4,7 +4,7 @@ import os
 import pytest
 
 from omac.cli import exit_codes
-from omac.cli.main import main
+from omac.cli.main import build_parser, main
 
 
 def test_no_args_prints_help_exit_ok(capsys):
@@ -12,6 +12,24 @@ def test_no_args_prints_help_exit_ok(capsys):
     out = capsys.readouterr().out
     for group in ("CORE", "WORK", "SETUP", "GUIDE", "WEB"):
         assert group in out
+
+
+def test_work_and_guide_help_have_explicit_agent_audience(capsys):
+    with pytest.raises(SystemExit) as work_exit:
+        main(["work", "--help"])
+    assert work_exit.value.code == 0
+    work_help = capsys.readouterr().out
+    assert "Agent" in work_help
+    assert "默认 JSON" in work_help
+    assert build_parser().parse_args(["work", "show", "issue-1"]).output == "json"
+
+    with pytest.raises(SystemExit) as guide_exit:
+        main(["guide", "--help"])
+    assert guide_exit.value.code == 0
+    guide_help = capsys.readouterr().out
+    assert "Agent" in guide_help
+    assert "实例事实" in guide_help
+    assert "omac work show" in guide_help
 
 
 def test_version(capsys):
@@ -58,6 +76,9 @@ def test_web_nonlocal_without_token_exits_validation(capsys):
 def test_guide_lists_grouped_topics(capsys):
     assert main(["guide"]) == exit_codes.OK
     out = capsys.readouterr().out
+    assert "Agent" in out
+    assert "omac work show" in out
+    assert "实例事实" in out
     assert "omac guide workflow" in out
     assert "omac guide role planner" in out
     assert "omac guide artifact design" in out

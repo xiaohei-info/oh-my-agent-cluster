@@ -38,6 +38,16 @@ class ProjectInfo:
 
 
 @dataclass(frozen=True)
+class PullRequestSnapshot:
+    """由 engine adapter 读取的当前 PR 权威状态。"""
+
+    url: str
+    is_draft: bool
+    state: str
+    head_revision: str
+
+
+@dataclass(frozen=True)
 class RuntimeTarget:
     """可承载 Agent 的运行时目标。"""
     id: str

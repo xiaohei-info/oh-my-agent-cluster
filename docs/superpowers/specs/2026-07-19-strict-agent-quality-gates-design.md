@@ -118,6 +118,7 @@ Worker verification adds a mandatory `quality` section:
 
 ```yaml
 quality:
+  delivered_revision: def456
   outcome_mapping:
     - outcome: login-valid-credentials
       implementation:
@@ -139,12 +140,15 @@ quality:
 
 Validation rules:
 
+- `delivered_revision` is required and equals the current PR head read through
+  the engine adapter at submission time.
 - `outcome_mapping` covers every required outcome exactly once.
 - Every mapping has at least one implementation path and one test path.
 - `regression_proof` covers every business test exactly once.
 - `head_exit_code` is zero.
 - If `must_fail_on_base` is true, `base_exit_code` must be non-zero.
-- `base_ref` and `head_ref` are non-empty and must differ.
+- `base_ref` and `head_ref` are non-empty and must differ; every `head_ref`
+  equals `delivered_revision`.
 - `runtime_fallbacks` must be an empty list.
 - `known_gaps` must be an empty list.
 - `evidence_origin` must be `real`; simulated/mock evidence is rejected.
@@ -210,7 +214,8 @@ Every finding has:
 
 ### 4.2 Completeness requirements
 
-- `reviewed_revision` is required.
+- `reviewed_revision` is required and equals both Worker `delivered_revision`
+  and the current PR head.
 - `changed_files` is non-empty for develop reviews.
 - Every review-scope boolean must be true.
 - `outcome_mapping` covers every contract outcome and records `pass` or `fail`.

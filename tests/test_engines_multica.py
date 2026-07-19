@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import pytest
 
@@ -756,3 +757,24 @@ def test_multica_runtime_lists_actual_runtime_shape(monkeypatch):
 
     assert len(targets) == 1
     assert targets[0].type == "codex"
+
+def test_inspect_pull_request_returns_current_head_revision(monkeypatch):
+    store = MulticaStore(EngineConfig(engine_type="multica", workspace_id="ws"))
+
+    class Result:
+        returncode = 0
+        stdout = json.dumps({
+            "isDraft": False,
+            "state": "OPEN",
+            "headRefOid": "abc123",
+        })
+        stderr = ""
+
+    monkeypatch.setattr("omac.engines.multica.subprocess.run", lambda *a, **k: Result())
+
+    snapshot = store.inspect_pull_request(
+        "https://github.com/acme/project/pull/7")
+
+    assert snapshot.is_draft is False
+    assert snapshot.state == "OPEN"
+    assert snapshot.head_revision == "abc123"

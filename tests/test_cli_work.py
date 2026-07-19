@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -581,6 +582,7 @@ def _make_verification(pr_base="feature/v1", coverage=95):
         "pr_base": pr_base,
         "coverage": coverage,
         "quality": {
+            "delivered_revision": "head-sha",
             "outcome_mapping": [{
                 "outcome": "outcome-works",
                 "implementation": ["src/feature.py"],
@@ -724,6 +726,96 @@ class TestSubmitPerKindPhase:
         assert got.verification is None
         assert got.status == WorkItemStatus.TODO
 
+    def test_develop_authoring_rejects_revision_that_is_not_current_pr_head(
+        self, tmp_path, monkeypatch,
+    ):
+        eng = _engine()
+        item = eng.store.create_work_item(
+            "mock-workspace", "t", "d", dag_key="a", worker="alice",
+            reviewer="bob", kind=dispatch_mod.TaskKind.DEVELOP,
+        )
+        eng.store.set_node_contract(item.id, CONTRACT)
+        monkeypatch.setattr(
+            eng.store,
+            "inspect_pull_request",
+            lambda _url: SimpleNamespace(
+                is_draft=False, state="OPEN", head_revision="current-pr-head"),
+            raising=False,
+        )
+        vfile = tmp_path / "verification.yaml"
+        vfile.write_text(yaml.safe_dump(_make_verification()))
+
+        with pytest.raises(ValidationError, match="current PR head"):
+            dispatch_mod.submit(
+                eng.store, item.id,
+                pr_url="https://x/pr/1", verification_file=str(vfile),
+            )
+
+        got = eng.store.get_work_item(item.id)
+        assert got.artifacts is None
+        assert got.verification is None
+
+    def test_develop_review_rejects_report_for_stale_pr_revision(
+        self, tmp_path, monkeypatch,
+    ):
+        eng = _engine()
+        item = eng.store.create_work_item(
+            "mock-workspace", "t", "d", dag_key="a", worker="alice",
+            reviewer="bob", kind=dispatch_mod.TaskKind.DEVELOP,
+        )
+        eng.store.set_node_contract(item.id, CONTRACT)
+        eng.store.update_work_item_metadata(
+            item.id,
+            phase=dispatch_mod.TaskPhase.REVIEW,
+            artifacts={"pr_url": "https://x/pr/1"},
+            verification=_make_verification(),
+        )
+        eng.store.update_status(item.id, WorkItemStatus.IN_REVIEW)
+        monkeypatch.setattr(
+            eng.store,
+            "inspect_pull_request",
+            lambda _url: SimpleNamespace(
+                is_draft=False, state="OPEN", head_revision="current-pr-head"),
+            raising=False,
+        )
+        rfile = tmp_path / "review.yaml"
+        rfile.write_text(yaml.safe_dump(_make_review_report()))
+
+        with pytest.raises(ValidationError, match="current PR head"):
+            dispatch_mod.submit(
+                eng.store, item.id, verdict="pass", report_file=str(rfile))
+
+    def test_pass_with_nits_followup_requires_new_revision_and_fresh_evidence(
+        self, tmp_path, monkeypatch,
+    ):
+        eng = _engine()
+        item = eng.store.create_work_item(
+            "mock-workspace", "t", "d", dag_key="a", worker="alice",
+            reviewer="bob", kind=dispatch_mod.TaskKind.DEVELOP,
+        )
+        eng.store.set_node_contract(item.id, CONTRACT)
+        eng.store.update_work_item_metadata(
+            item.id,
+            phase=dispatch_mod.TaskPhase.AUTHORING,
+            review_verdict="pass-with-nits",
+            review_report=_make_review_report(),
+        )
+        monkeypatch.setattr(
+            eng.store,
+            "inspect_pull_request",
+            lambda _url: SimpleNamespace(
+                is_draft=False, state="OPEN", head_revision="head-sha"),
+            raising=False,
+        )
+        vfile = tmp_path / "verification.yaml"
+        vfile.write_text(yaml.safe_dump(_make_verification()))
+
+        with pytest.raises(ValidationError, match="new revision"):
+            dispatch_mod.submit(
+                eng.store, item.id,
+                pr_url="https://x/pr/1", verification_file=str(vfile),
+            )
+
     def test_develop_authoring_rejects_github_draft_pr_atomic(self, tmp_path, monkeypatch):
         eng = _engine()
         item = eng.store.create_work_item(
@@ -734,12 +826,12 @@ class TestSubmitPerKindPhase:
         vfile = tmp_path / "verification.yaml"
         vfile.write_text(yaml.safe_dump(_make_verification()))
 
-        class _R:
-            returncode = 0
-            stdout = '{"isDraft": true}\n'
-            stderr = ""
-
-        monkeypatch.setattr(dispatch_mod.subprocess, "run", lambda *a, **k: _R())
+        monkeypatch.setattr(
+            eng.store,
+            "inspect_pull_request",
+            lambda _url: SimpleNamespace(
+                is_draft=True, state="OPEN", head_revision="head-sha"),
+        )
 
         with pytest.raises(ValidationError) as exc:
             dispatch_mod.submit(
@@ -765,18 +857,12 @@ class TestSubmitPerKindPhase:
         vfile = tmp_path / "verification.yaml"
         vfile.write_text(yaml.safe_dump(_make_verification()))
 
-        class _R:
-            returncode = 0
-            stdout = json.dumps({
-                "isDraft": False,
-                "state": "OPEN",
-                "headRefName": "agent/codex/wave0",
-                "title": "feat: skeleton",
-                "body": "No issue key here.",
-            })
-            stderr = ""
-
-        monkeypatch.setattr(dispatch_mod.subprocess, "run", lambda *a, **k: _R())
+        monkeypatch.setattr(
+            eng.store,
+            "inspect_pull_request",
+            lambda _url: SimpleNamespace(
+                is_draft=False, state="OPEN", head_revision="head-sha"),
+        )
 
         result = dispatch_mod.submit(
             eng.store, item.id,
@@ -796,12 +882,12 @@ class TestSubmitPerKindPhase:
         vfile = tmp_path / "verification.yaml"
         vfile.write_text(yaml.safe_dump(_make_verification()))
 
-        class _R:
-            returncode = 0
-            stdout = '{"isDraft": false}\n'
-            stderr = ""
-
-        monkeypatch.setattr(dispatch_mod.subprocess, "run", lambda *a, **k: _R())
+        monkeypatch.setattr(
+            eng.store,
+            "inspect_pull_request",
+            lambda _url: SimpleNamespace(
+                is_draft=False, state="OPEN", head_revision="head-sha"),
+        )
 
         result = dispatch_mod.submit(
             eng.store, item.id,
@@ -822,6 +908,11 @@ class TestSubmitPerKindPhase:
         )
         item.phase = dispatch_mod.TaskPhase.REVIEW
         eng.store.set_node_contract(item.id, CONTRACT)
+        eng.store.update_work_item_metadata(
+            item.id,
+            artifacts={"pr_url": "https://github.com/acme/snake/pull/1"},
+            verification=_make_verification(),
+        )
         rfile = tmp_path / "report.yaml"
         rfile.write_text(yaml.safe_dump(_make_review_report()))
 
@@ -849,6 +940,11 @@ class TestSubmitPerKindPhase:
         )
         item.phase = dispatch_mod.TaskPhase.REVIEW
         store.set_node_contract(item.id, CONTRACT)
+        store.update_work_item_metadata(
+            item.id,
+            artifacts={"pr_url": "https://github.com/acme/snake/pull/1"},
+            verification=_make_verification(),
+        )
         rfile = tmp_path / "report.yaml"
         rfile.write_text(yaml.safe_dump(_make_review_report()))
 
@@ -872,14 +968,29 @@ class TestSubmitPerKindPhase:
         """
         eng = _engine()
         item = eng.store.create_work_item(
-            "mock-workspace", "t", "d", dag_key="a", worker="alice",
+            "mock-workspace", "t", "d", dag_key="a", worker="alice", reviewer="bob",
             kind=dispatch_mod.TaskKind.DEVELOP,
             initial_status=WorkItemStatus.IN_REVIEW,
         )
         item.phase = dispatch_mod.TaskPhase.REVIEW
+        eng.store.set_node_contract(item.id, CONTRACT)
+        eng.store.update_work_item_metadata(
+            item.id,
+            artifacts={"pr_url": "https://github.com/acme/snake/pull/1"},
+            verification=_make_verification(),
+        )
         rfile = tmp_path / "report.yaml"
         report = _make_review_report()
-        report["blockers"] = ["验收映射不满足"]
+        report["findings"] = [{
+            "id": "REV-001",
+            "severity": "blocker",
+            "category": "business-behavior",
+            "location": "src/feature.py:10",
+            "evidence": "验收映射不满足",
+            "impact": "核心业务行为不可交付",
+            "required_fix": "补齐并验证验收行为",
+        }]
+        report["blockers"] = ["REV-001"]
         report["acceptance_mapping"][0]["status"] = "fail"
         rfile.write_text(yaml.safe_dump(report))
 
@@ -890,7 +1001,7 @@ class TestSubmitPerKindPhase:
         got = eng.store.get_work_item(item.id)
         assert result.advanced_to == WorkItemStatus.IN_REVIEW
         assert got.review_verdict == "reject"
-        assert got.review_report["blockers"] == ["验收映射不满足"]
+        assert got.review_report["blockers"] == ["REV-001"]
         assert got.review_report_ref["filename"] == "omac-review-report.yaml"
 
     def test_plan_review_without_deliverable_rejected(self, tmp_path):
@@ -1096,6 +1207,7 @@ class TestSubmitPerKindPhase:
     def test_decompose_authoring_success(self, tmp_path):
         eng = _engine()
         members = set(eng.store.list_members("mock-workspace"))
+        worker, reviewer = sorted(members)[:2]
         item = eng.store.create_work_item(
             "mock-workspace", "t", "d", dag_key="a", worker="alice",
             kind=dispatch_mod.TaskKind.DECOMPOSE,
@@ -1103,7 +1215,7 @@ class TestSubmitPerKindPhase:
         mfile = tmp_path / "manifest.yaml"
         mfile.write_text(yaml.safe_dump({
             "meta": {},
-            "nodes": [{"id": "b", "worker": sorted(members)[0],
+            "nodes": [{"id": "b", "worker": worker, "reviewer": reviewer,
                        "contract": {
                            "objective": "x", "acceptance": ["y"], "non_goals": ["z"],
                            "source_of_truth": ["docs/b.md"],

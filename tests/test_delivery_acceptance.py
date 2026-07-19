@@ -36,6 +36,48 @@ def _engine(**extra):
     return eng
 
 
+def _fix_node(node_id, worker, blocked_by):
+    reviewer = "bob" if worker == "alice" else "alice"
+    command = f"pytest tests/int/{node_id}"
+    return Node(
+        id=node_id,
+        worker=worker,
+        reviewer=reviewer,
+        blocked_by=blocked_by,
+        contract=Contract(
+            objective=f"Fix {node_id}",
+            source_of_truth=[f"docs/{node_id}.md"],
+            acceptance=[f"{node_id}-works"],
+            non_goals=["no scope creep"],
+            verification_commands=[f"pytest tests/{node_id}"],
+            integration_gates=[{
+                "name": f"{node_id}-gate", "layer": "L1",
+                "delivery_goal": f"{node_id} delivered",
+                "source_of_truth": [f"docs/{node_id}.md"],
+                "covers": [node_id],
+                "acceptance_refs": [f"{node_id}-works"],
+                "commands": [command],
+            }],
+            quality={
+                "required_outcomes": [{
+                    "id": f"{node_id}-outcome",
+                    "source_ref": f"acceptance#{node_id}.run",
+                }],
+                "business_tests": [{
+                    "id": f"{node_id}-business",
+                    "outcome_refs": [f"{node_id}-outcome"],
+                    "command": command,
+                    "level": "integration",
+                    "real_dependencies": ["none"],
+                    "must_fail_on_base": True,
+                }],
+                "runtime_data_policy": "real-or-error",
+            },
+            pr_base="main",
+        ),
+    )
+
+
 def _done_manifest(path):
     """2 节点、全部 done 的 manifest(模拟内层 loop 已收敛)."""
     m = Manifest(meta={"name": "feature-x", "pr_base": "feature/v1"}, nodes={
@@ -180,7 +222,7 @@ def test_incremental_decompose_issue_has_failed_flow_and_manifest_context(tmp_pa
         ],
     }, {
         "decompose-r1": Manifest(meta={}, nodes={
-            "fix-login": Node(id="fix-login", worker="alice", blocked_by=["a"]),
+            "fix-login": _fix_node("fix-login", "alice", ["a"]),
         }),
     })
 
@@ -232,8 +274,8 @@ def test_e2e_two_fails_then_pass(tmp_path):
     }
     increments = {
         "decompose-r1": Manifest(meta={}, nodes={
-            "fix-export": Node(id="fix-export", worker="alice", blocked_by=["b"]),
-            "fix-search": Node(id="fix-search", worker="bob", blocked_by=["b"]),
+            "fix-export": _fix_node("fix-export", "alice", ["b"]),
+            "fix-search": _fix_node("fix-search", "bob", ["b"]),
         }),
     }
     MockStore.set_acceptance_behaviors(accepted, increments)
@@ -328,10 +370,10 @@ def test_max_rounds_exhausted(tmp_path):
     }
     increments = {
         "decompose-r1": Manifest(meta={}, nodes={
-            "fix-f2-r1": Node(id="fix-f2-r1", worker="alice", blocked_by=["b"]),
+            "fix-f2-r1": _fix_node("fix-f2-r1", "alice", ["b"]),
         }),
         "decompose-r2": Manifest(meta={}, nodes={
-            "fix-f2-r2": Node(id="fix-f2-r2", worker="alice", blocked_by=["b"]),
+            "fix-f2-r2": _fix_node("fix-f2-r2", "alice", ["b"]),
         }),
     }
     MockStore.set_acceptance_behaviors(accepted, increments)
@@ -367,7 +409,7 @@ def test_increment_persisted_resumable(tmp_path):
         ],
     }, {
         "decompose-r1": Manifest(meta={}, nodes={
-            "fix-f2": Node(id="fix-f2", worker="alice", blocked_by=["b"]),
+            "fix-f2": _fix_node("fix-f2", "alice", ["b"]),
         }),
     })
 
@@ -432,7 +474,7 @@ def test_decompose_submit_real_path(tmp_path):
         "b": Node(id="b", worker="bob", blocked_by=["a"], status="done"),
     })
     manifest = Manifest(meta={}, nodes={
-        "fix-b": Node(id="fix-b", worker="alice", blocked_by=["b"]),
+        "fix-b": _fix_node("fix-b", "alice", ["b"]),
     })
     mpath = str(tmp_path / "increment.yaml")
     save_manifest(manifest, mpath)
@@ -457,7 +499,7 @@ def test_decompose_submit_rejects_unknown_blocked_by(tmp_path):
     """decompose authoring 引用不存在节点 → 校验失败,状态不动。"""
     eng, store, item = _decompose_store(tmp_path)
     manifest = Manifest(meta={}, nodes={
-        "fix-b": Node(id="fix-b", worker="alice", blocked_by=["nonexistent"]),
+        "fix-b": _fix_node("fix-b", "alice", ["nonexistent"]),
     })
     mpath = str(tmp_path / "bad.yaml")
     save_manifest(manifest, mpath)

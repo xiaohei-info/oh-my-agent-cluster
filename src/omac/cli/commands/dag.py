@@ -6,6 +6,8 @@ import argparse
 import os
 import time
 
+import yaml
+
 from .. import exit_codes
 from ..output import add_output_flag, hint, print_json, print_table
 from ...core.config import (
@@ -14,7 +16,7 @@ from ...core.config import (
 )
 from ...core.graph import node_waves
 from ...core.lint import lint
-from ...core.manifest import load_manifest, manifest_write_lock
+from ...core.manifest import load_manifest, loads_manifest, manifest_write_lock
 from ...core.gitsync import ensure_config_synced
 from ...engines import create_engine
 from ...engines.models import EngineConfig
@@ -177,11 +179,7 @@ def _assemble_engine(args):
         inc_raw = _json.loads(increments) if increments else {}
         inc = {}
         for dk, payload in inc_raw.items():
-            from omac.core.manifest import Manifest, Node
-            nodes = {n["id"]: Node(id=n["id"], worker=n["worker"],
-                                     blocked_by=list(n.get("blocked_by", [])))
-                     for n in payload.get("nodes", [])}
-            inc[dk] = Manifest(meta=payload.get("meta", {}), nodes=nodes)
+            inc[dk] = loads_manifest(yaml.safe_dump(payload, allow_unicode=True))
         engine.store.set_acceptance_behaviors(acc, inc)
 
     return engine, engine_config

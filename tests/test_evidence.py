@@ -1,4 +1,5 @@
 """core.evidence:worker 证据门、review 证据门、acceptance 验收门(三道门共用同一套 schema)。"""
+from copy import deepcopy
 import pytest
 
 from omac.core.evidence import (
@@ -87,6 +88,7 @@ def _good_verification():
         "pr_base": "feature/v1",
         "coverage": 95,
         "quality": {
+            "delivered_revision": "head-sha",
             "outcome_mapping": [{
                 "outcome": "outcome-works",
                 "implementation": ["src/feature.py"],
@@ -159,6 +161,33 @@ def test_worker_evidence_missing_command():
     assert any("missing command" in e for e in errs)
 
 
+def test_worker_evidence_rejects_non_string_command_without_crashing():
+    verification = _good_verification()
+    verification["commands"] = [{"cmd": {"nested": "pytest -q"}, "exit_code": 0}]
+    errs = validate_worker_evidence(
+        NODE, Item(artifacts={"pr_url": "u"}, verification=verification))
+    assert any("command cmd must be a non-empty string" in error for error in errs)
+
+
+def test_worker_evidence_rejects_malformed_contract_quality_ids_without_crashing():
+    contract = deepcopy(CONTRACT)
+    contract.quality.required_outcomes[0]["id"] = {"nested": "outcome-works"}
+    node = Node(id="malformed", worker="alice", contract=contract)
+    errs = validate_worker_evidence(
+        node,
+        Item(artifacts={"pr_url": "u"}, verification=_good_verification()),
+    )
+    assert any("contract quality outcome id must be a non-empty string" in error for error in errs)
+
+
+def test_worker_evidence_rejects_non_string_regression_test_id_without_crashing():
+    verification = _good_verification()
+    verification["quality"]["regression_proof"][0]["test_id"] = {"id": "business-works"}
+    errs = validate_worker_evidence(
+        NODE, Item(artifacts={"pr_url": "u"}, verification=verification))
+    assert any("test_id is required" in error for error in errs)
+
+
 def test_worker_evidence_env_setup_required_when_integration_gates():
     v = _good_verification()
     del v["env_setup"]
@@ -213,6 +242,52 @@ def test_worker_evidence_requires_all_outcome_mappings():
     errs = validate_worker_evidence(
         NODE, Item(artifacts={"pr_url": "u"}, verification=verification))
     assert any("missing outcome mapping: outcome-works" in e for e in errs)
+
+
+def test_worker_evidence_requires_canonical_delivered_revision():
+    verification = _good_verification()
+    del verification["quality"]["delivered_revision"]
+
+    errs = validate_worker_evidence(
+        NODE, Item(artifacts={"pr_url": "u"}, verification=verification))
+
+    assert any("delivered_revision is required" in error for error in errs)
+
+
+def test_worker_evidence_requires_every_business_test_on_delivered_revision():
+    verification = _good_verification()
+    verification["quality"]["regression_proof"][0]["head_ref"] = "other-head"
+
+    errs = validate_worker_evidence(
+        NODE, Item(artifacts={"pr_url": "u"}, verification=verification))
+
+    assert any("head_ref must match delivered_revision" in error for error in errs)
+
+
+def test_worker_evidence_delivered_revision_must_match_current_pr_head():
+    verification = _good_verification()
+
+    errs = validate_worker_evidence(
+        NODE,
+        Item(artifacts={"pr_url": "u"}, verification=verification),
+        expected_revision="current-pr-head",
+    )
+
+    assert any("delivered_revision must match current PR head" in error for error in errs)
+
+
+def test_pass_with_nits_worker_followup_requires_new_delivered_revision():
+    errs = validate_worker_evidence(
+        NODE,
+        Item(
+            artifacts={"pr_url": "u"},
+            verification=_good_verification(),
+            review_verdict="pass-with-nits",
+            review_report={"reviewed_revision": "head-sha"},
+        ),
+    )
+
+    assert any("pass-with-nits follow-up must submit a new revision" in error for error in errs)
 
 
 def test_worker_evidence_requires_base_failure_for_business_test():
@@ -362,6 +437,36 @@ def test_review_evidence_requires_reviewed_revision():
     report["reviewed_revision"] = ""
     errs = validate_review_evidence(NODE, Item(review_verdict="pass", review_report=report))
     assert any("reviewed_revision is required" in e for e in errs)
+
+
+def test_review_evidence_revision_must_match_worker_delivery():
+    report = _good_report()
+    report["reviewed_revision"] = "stale-head"
+
+    errs = validate_review_evidence(
+        NODE,
+        Item(
+            review_verdict="pass",
+            review_report=report,
+            verification=_good_verification(),
+        ),
+    )
+
+    assert any("reviewed_revision must match Worker delivered_revision" in error for error in errs)
+
+
+def test_review_evidence_revision_must_match_current_pr_head():
+    errs = validate_review_evidence(
+        NODE,
+        Item(
+            review_verdict="pass",
+            review_report=_good_report(),
+            verification=_good_verification(),
+        ),
+        expected_revision="current-pr-head",
+    )
+
+    assert any("reviewed_revision must match current PR head" in error for error in errs)
 
 
 def test_review_evidence_requires_complete_review_scope():
@@ -603,3 +708,15 @@ def test_load_acceptance_doc_rejects_duplicate_action_ids_within_flow():
 def test_acceptance_doc_exposes_qualified_action_ids():
     doc = load_acceptance_doc({"flows": [_flow(flow_id="login", action_id="submit")]})
     assert doc.action_ids == ["login.submit"]
+
+
+@pytest.mark.parametrize("flow_id", ["account.login", "account#login", "account login"])
+def test_acceptance_flow_id_rejects_ambiguous_segment_characters(flow_id):
+    with pytest.raises(ValueError, match="flow.id must match"):
+        load_acceptance_doc({"flows": [_flow(flow_id=flow_id)]})
+
+
+@pytest.mark.parametrize("action_id", ["form.submit", "form#submit", "form submit"])
+def test_acceptance_action_id_rejects_ambiguous_segment_characters(action_id):
+    with pytest.raises(ValueError, match="action.id must match"):
+        load_acceptance_doc({"flows": [_flow(action_id=action_id)]})

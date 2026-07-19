@@ -6,8 +6,16 @@ from omac.core.manifest import Contract, Manifest, Node
 POOL = {"alice", "bob"}
 
 
-def _node(id, worker="alice", **kw):
-    return Node(id=id, worker=worker, **kw)
+_DEFAULT = object()
+
+
+def _node(id, worker="alice", reviewer=_DEFAULT, contract=_DEFAULT, **kw):
+    if reviewer is _DEFAULT:
+        reviewer = "bob" if worker == "alice" else "alice"
+    if contract is _DEFAULT:
+        contract = _valid_contract()
+    return Node(
+        id=id, worker=worker, reviewer=reviewer, contract=contract, **kw)
 
 
 def _manifest(*nodes):
@@ -58,6 +66,30 @@ def test_contract_hard_gates():
                    "verification_commands", "integration_gates", "pr_base",
                    "source_of_truth", "quality"):
         assert needle in joined
+
+
+def test_develop_node_requires_contract():
+    errs = lint(_manifest(_node("a", reviewer="bob", contract=None)), POOL)
+    assert any("contract is required" in error for error in errs)
+
+
+def test_develop_node_requires_independent_reviewer():
+    errs = lint(_manifest(_node(
+        "a", reviewer=None, contract=_valid_contract())), POOL)
+    assert any("reviewer is required" in error for error in errs)
+
+
+def test_increment_requires_contract_and_independent_reviewer():
+    from omac.core.lint import lint_increment
+
+    existing = _manifest(_node(
+        "existing", reviewer="bob", contract=_valid_contract()))
+    increment = _manifest(_node("fix", reviewer=None, contract=None))
+
+    errs = lint_increment(increment, existing, POOL)
+
+    assert any("contract is required" in error for error in errs)
+    assert any("reviewer is required" in error for error in errs)
 
 
 def _valid_contract(**over):
@@ -183,3 +215,30 @@ def test_quality_source_ref_flow_must_belong_to_node_acceptance():
         acceptance=acceptance,
     )
     assert any("source_ref flow is not declared in contract.acceptance" in e for e in errs)
+
+
+def test_contract_rejects_non_string_verification_command_without_crashing():
+    contract = _valid_contract(verification_commands=[{"cmd": "pytest -q"}])
+    errs = lint(_manifest(_node("a", reviewer="bob", contract=contract)), POOL)
+    assert any("verification_commands must be non-empty strings" in error for error in errs)
+
+
+def test_integration_gate_rejects_non_string_command_without_crashing():
+    contract = _valid_contract()
+    contract.integration_gates[0]["commands"] = [{"cmd": "pytest tests/int"}]
+    errs = lint(_manifest(_node("a", reviewer="bob", contract=contract)), POOL)
+    assert any("commands must be non-empty strings" in error for error in errs)
+
+
+def test_quality_rejects_non_string_outcome_ref_without_crashing():
+    contract = _valid_contract()
+    contract.quality.business_tests[0]["outcome_refs"] = [{"id": "outcome-x"}]
+    errs = lint(_manifest(_node("a", reviewer="bob", contract=contract)), POOL)
+    assert any("outcome_refs must be non-empty strings" in error for error in errs)
+
+
+def test_quality_rejects_non_string_real_dependency_without_crashing():
+    contract = _valid_contract()
+    contract.quality.business_tests[0]["real_dependencies"] = [{"name": "postgres"}]
+    errs = lint(_manifest(_node("a", reviewer="bob", contract=contract)), POOL)
+    assert any("real_dependencies must be non-empty strings" in error for error in errs)

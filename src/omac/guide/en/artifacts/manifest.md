@@ -109,7 +109,7 @@ must be acyclic.
 |---|---|
 | `id` | Unique stable manifest ID. |
 | `title` / `description` | Short explanation; description references facts, not copied design body. |
-| `worker` / `reviewer` | Current-pool members; reviewer differs from worker. |
+| `worker` / `reviewer` | Both are required current-pool members; reviewer differs from worker. |
 | `blocked_by` | Actual prerequisite node IDs; use `[]` when none. |
 | `work_item_id` / `status` | Runtime-populated facts; do not invent them during authoring. |
 | `contract` | The node's only implementation and review contract. |
@@ -156,8 +156,10 @@ branch, or future-work promise is not a delivered node.
 
 ## Validation gates
 
-1. YAML parses; every node has `id` and `worker`.
-2. Worker and reviewer are in the agent pool and are different people.
+1. YAML parses; every node has `id`, `worker`, an independent `reviewer`, and a
+   complete `contract`.
+2. Worker and reviewer are in the agent pool and are different people; a missing
+   reviewer or self-review node fails immediately.
 3. `blocked_by` references valid nodes; the DAG has no cycle; incremental IDs do
    not collide with existing nodes.
 4. Contract `objective`, `source_of_truth`, `acceptance`, `non_goals`,

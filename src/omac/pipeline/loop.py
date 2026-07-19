@@ -19,9 +19,11 @@ from ..pipeline.delivery import advance_delivery, run_merge_delivery
 from ..engines.models import WorkItemStatus
 from ..engines.runtime import AgentRuntime
 from ..engines.store import WorkItemStore
-from ..errors import PlatformError
+from ..errors import PlatformError, ValidationError
 from ..i18n import current_language, ui
-from ..pipeline.dispatch import normalize_source_refs, render_issue_body
+from ..pipeline.dispatch import (
+    inspect_ready_pull_request, normalize_source_refs, render_issue_body,
+)
 from ..core.taskmeta import TaskKind, TaskPhase
 
 log = logsetup.get_logger(__name__)
@@ -99,6 +101,44 @@ def _has_unreviewed_worker_delivery(node, item) -> bool:
         and item.artifacts
         and item.verification
     )
+
+
+def _block_invalid_develop_nodes(
+    store: WorkItemStore,
+    manifest: Manifest,
+    manifest_path: str,
+) -> Dict[str, str]:
+    """防御性阻断无法进入严格交付链的 develop 节点。"""
+    failures: Dict[str, str] = {}
+    for key, node in manifest.nodes.items():
+        if node.status in TERMINAL_STATUSES:
+            continue
+        reason = None
+        if node.contract is None:
+            reason = ui(
+                "Develop node contract is required. Add a complete contract and rerun manifest lint.",
+                "develop 节点必须包含完整 contract。请补齐 contract 并重新运行 manifest lint。",
+            )
+        elif not node.reviewer:
+            reason = ui(
+                "An independent reviewer is required. Configure reviewer different from worker.",
+                "develop 节点必须配置独立 reviewer，且 reviewer 必须与 worker 不同。",
+            )
+        elif node.reviewer == node.worker:
+            reason = ui(
+                "Reviewer must differ from worker. Configure an independent reviewer.",
+                "reviewer 必须与 worker 不同。请配置独立 reviewer。",
+            )
+        if reason is None:
+            continue
+        if node.work_item_id:
+            store.update_status(node.work_item_id, WorkItemStatus.BLOCKED)
+            store.add_comment(node.work_item_id, reason)
+        set_node(manifest, key, status="blocked")
+        failures[key] = reason
+    if failures:
+        save_manifest(manifest, manifest_path)
+    return failures
 
 
 # ==================== reconcile ====================
@@ -289,11 +329,18 @@ def collect_results(
                 runtime.wake(node.work_item_id, node.worker, "worker")
                 continue
             if item.status == WorkItemStatus.DONE:
-                gate_errors = validate_worker_evidence(
-                    node,
-                    item,
-                    allow_mock_evidence=(store.config.engine_type == "mock"),
-                )
+                try:
+                    artifacts = item.artifacts if isinstance(item.artifacts, dict) else {}
+                    snapshot = inspect_ready_pull_request(
+                        store, artifacts.get("pr_url"))
+                    gate_errors = validate_worker_evidence(
+                        node,
+                        item,
+                        allow_mock_evidence=(store.config.engine_type == "mock"),
+                        expected_revision=snapshot.head_revision,
+                    )
+                except ValidationError as exc:
+                    gate_errors = [str(exc)]
                 if gate_errors:
                     reason = "; ".join(gate_errors)
                     store.update_status(node.work_item_id, WorkItemStatus.BLOCKED)
@@ -398,7 +445,14 @@ def collect_results(
 
             log.info(logsetup.EVT_VERDICT, kind=_DAG_KIND, node=key,
                      id=node.work_item_id, verdict=verdict)
-            gate_errors = validate_review_evidence(node, item)
+            try:
+                artifacts = item.artifacts if isinstance(item.artifacts, dict) else {}
+                snapshot = inspect_ready_pull_request(
+                    store, artifacts.get("pr_url"))
+                gate_errors = validate_review_evidence(
+                    node, item, expected_revision=snapshot.head_revision)
+            except ValidationError as exc:
+                gate_errors = [str(exc)]
             if verdict == "pass-with-nits" and not gate_errors:
                 store.update_work_item_metadata(
                     node.work_item_id, phase=TaskPhase.AUTHORING,
@@ -721,9 +775,12 @@ def tick(
     # 1. Reconcile: 平台状态同步回 manifest
     reconcile(store, manifest, manifest_path)
 
-    # 2. SYNC: 回收进行中节点的结果
-    new_failures = collect_results(store, runtime, manifest, manifest_path,
-                                   retry_limits=retry_limits, config=config)
+    # 2. SYNC: 先阻断缺 contract / 独立 reviewer 的非法节点，再回收合法运行节点。
+    new_failures = _block_invalid_develop_nodes(
+        store, manifest, manifest_path)
+    new_failures.update(collect_results(
+        store, runtime, manifest, manifest_path,
+        retry_limits=retry_limits, config=config))
 
     # 3. 收集全部失败节点(含本轮新失败 + 历史已 blocked/failed)
     all_failed: Set[str] = set(new_failures.keys())

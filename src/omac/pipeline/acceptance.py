@@ -33,7 +33,9 @@ from ..core.config import (
 )
 from ..core.evidence import validate_acceptance_results
 from ..core.lint import lint_increment
-from ..core.manifest import Manifest, Node, _dump_contract, merge_increment, save_manifest
+from ..core.manifest import (
+    Manifest, _dump_contract, loads_manifest, merge_increment, save_manifest,
+)
 from ..core.taskmeta import TaskKind, make_dag_key
 from ..engines.models import WorkItemStatus
 from ..engines.store import WorkItemStore
@@ -417,11 +419,14 @@ def _run_inner_loop(
     """
     retry_limits = resolve_retry(config)
     max_parallel = config.get("defaults", {}).get("max_parallel", 4)
+    loop_config = dict(config)
+    loop_config.setdefault("engine", engine.store.config.engine_type)
 
     for _ in range(max_ticks):
         result = loop_mod.tick(
             engine.store, engine.runtime, manifest, manifest_path,
-            max_parallel=max_parallel, retry_limits=retry_limits, config=config)
+            max_parallel=max_parallel, retry_limits=retry_limits,
+            config=loop_config)
         if result.state == "converged":
             return
         if result.state == "needs_decision":
@@ -514,33 +519,10 @@ def _read_increment(store: WorkItemStore, item_id: str) -> Optional[Manifest]:
     if not deliverable or not isinstance(deliverable, str):
         return None
     try:
-        raw = yaml.safe_load(deliverable)
-    except yaml.YAMLError:
+        increment = loads_manifest(deliverable)
+    except (TypeError, ValueError, yaml.YAMLError):
         return None
-    if not isinstance(raw, dict):
-        return None
-    nodes_raw = raw.get("nodes")
-    if not isinstance(nodes_raw, list) or not nodes_raw:
-        return None
-    nodes = {}
-    for n in nodes_raw:
-        if not isinstance(n, dict):
-            continue
-        n_id = n.get("id")
-        n_worker = n.get("worker")
-        if not isinstance(n_id, str) or not n_id:
-            continue
-        if not isinstance(n_worker, str) or not n_worker:
-            continue
-        nodes[n_id] = Node(
-            id=n_id, worker=n_worker,
-            blocked_by=list(n.get("blocked_by", []) or []),
-            status=n.get("status", "todo"),
-            work_item_id=n.get("work_item_id"),
-        )
-    if not nodes:
-        return None
-    return Manifest(meta=raw.get("meta") or {}, nodes=nodes)
+    return increment if increment.nodes else None
 
 
 def _dump_manifest(manifest: Manifest) -> Dict[str, Any]:

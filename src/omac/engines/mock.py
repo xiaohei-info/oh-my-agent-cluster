@@ -18,7 +18,7 @@ from ..errors import ValidationError
 from ..i18n import ui
 from .models import (
     AgentInfo, AgentProvisionSpec, EngineConfig, ProjectInfo, RuntimeTarget,
-    WorkItem, WorkItemStatus, WorkspaceInfo,
+    PullRequestSnapshot, WorkItem, WorkItemStatus, WorkspaceInfo,
 )
 from .runtime import AgentRuntime
 from .store import WorkItemStore
@@ -88,19 +88,9 @@ def _write_tmp_json(data) -> str:
 def _write_tmp_manifest(manifest) -> str:
     """把增量 Manifest 序列化为符合 manifest schema 的 YAML 临时文件。"""
     fd, path = tempfile.mkstemp(suffix=".yaml")
-    data = {
-        "meta": dict(manifest.meta or {}),
-        "nodes": [
-            {
-                "id": n.id, "worker": n.worker,
-                "blocked_by": list(n.blocked_by or []),
-                "status": n.status or "todo",
-            }
-            for n in manifest.nodes.values()
-        ],
-    }
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        yaml.safe_dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    os.close(fd)
+    from ..core.manifest import save_manifest
+    save_manifest(manifest, path)
     return path
 
 
@@ -126,17 +116,11 @@ def _parse_base_manifest(item):
         data = manifest_raw
     if not isinstance(data, dict):
         return None
-    from ..core.manifest import Manifest, Node
-    nodes = {}
-    for n in data.get("nodes", []):
-        if not isinstance(n, dict) or "id" not in n:
-            continue
-        nodes[n["id"]] = Node(
-            id=n["id"], worker=n.get("worker", ""),
-            blocked_by=list(n.get("blocked_by", []) or []),
-            status=n.get("status", "todo"),
-        )
-    return Manifest(meta=data.get("meta") or {}, nodes=nodes)
+    from ..core.manifest import loads_manifest
+    try:
+        return loads_manifest(yaml.safe_dump(data, allow_unicode=True))
+    except (TypeError, ValueError, yaml.YAMLError):
+        return None
 
 
 class MockStore(WorkItemStore):
@@ -395,10 +379,16 @@ class MockStore(WorkItemStore):
         from ..core.manifest import Contract as _Contract
 
         contract = _shared_contracts_by_item_id.get(item_id)
+        item = _shared_work_items.get(item_id)
         if contract is None or not isinstance(contract, _Contract):
             # 非 develop 节点(final-acceptance/decompose)的 contract 是 dict,
             # 不产生 verification 证据(该节点类型本身不经 worker 证据门)。
             return None
+        delivered_revision = (
+            "head-sha-nits"
+            if item is not None and item.review_verdict == "pass-with-nits"
+            else "head-sha"
+        )
         return {
             "commands": [
                 {"cmd": cmd, "exit_code": 0, "summary": "Mock: passed"}
@@ -427,6 +417,7 @@ class MockStore(WorkItemStore):
                 f"Mock env: {gate.get('name')}" for gate in contract.integration_gates
             ] if contract.integration_gates else [],
             "quality": {
+                "delivered_revision": delivered_revision,
                 "outcome_mapping": [
                     {
                         "outcome": outcome.get("id"),
@@ -440,7 +431,7 @@ class MockStore(WorkItemStore):
                         "test_id": business_test.get("id"),
                         "base_ref": "mock-base",
                         "base_exit_code": 1,
-                        "head_ref": "mock-head",
+                        "head_ref": delivered_revision,
                         "head_exit_code": 0,
                     }
                     for business_test in (contract.quality.business_tests if contract.quality else [])
@@ -487,8 +478,12 @@ class MockStore(WorkItemStore):
             }]
             nits = ["MOCK-001"]
 
+        item = _shared_work_items.get(item_id)
+        verification = item.verification if item is not None else None
+        from ..core.evidence import delivered_revision_of
+        reviewed_revision = delivered_revision_of(verification) or "head-sha"
         return {
-            "reviewed_revision": "mock-head",
+            "reviewed_revision": reviewed_revision,
             "review_goals": ["Mock review goal"],
             "diff_reviewed": True,
             "tests_rerun": True,
@@ -537,6 +532,23 @@ class MockStore(WorkItemStore):
 
     def list_members(self, workspace_id: str) -> List[str]:
         return _shared_members.get(workspace_id, ["alice", "bob", "charlie"])
+
+    def inspect_pull_request(self, pr_url: str) -> PullRequestSnapshot:
+        extra = self.config.extra or {}
+        head_revision = str(extra.get("MOCK_PR_HEAD_REVISION", "head-sha"))
+        for item in _shared_work_items.values():
+            artifacts = item.artifacts if isinstance(item.artifacts, dict) else {}
+            if artifacts.get("pr_url") != pr_url:
+                continue
+            if item.review_verdict == "pass-with-nits" and item.phase == TaskPhase.AUTHORING:
+                head_revision = "head-sha-nits"
+            break
+        return PullRequestSnapshot(
+            url=pr_url,
+            is_draft=str(extra.get("MOCK_PR_DRAFT", "false")).lower() == "true",
+            state=str(extra.get("MOCK_PR_STATE", "OPEN")),
+            head_revision=head_revision,
+        )
 
     # ==================== 工作空间发现 ====================
 

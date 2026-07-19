@@ -15,6 +15,39 @@ def _write_manifest(tmp_path, nodes_yaml):
     return str(p)
 
 
+def _complete_contract_raw(node_id="b"):
+    return {
+        "objective": f"deliver {node_id}",
+        "source_of_truth": [f"docs/{node_id}.md"],
+        "acceptance": [f"{node_id} works"],
+        "non_goals": ["no scope creep"],
+        "verification_commands": ["pytest -q"],
+        "integration_gates": [{
+            "name": f"{node_id}-gate", "layer": "L1",
+            "delivery_goal": f"{node_id} delivered",
+            "source_of_truth": [f"docs/{node_id}.md"],
+            "covers": [node_id], "acceptance_refs": [f"{node_id} works"],
+            "commands": ["pytest tests/int"],
+        }],
+        "quality": {
+            "required_outcomes": [{
+                "id": f"{node_id}-outcome",
+                "source_ref": f"acceptance#{node_id}.run",
+            }],
+            "business_tests": [{
+                "id": f"{node_id}-business",
+                "outcome_refs": [f"{node_id}-outcome"],
+                "command": "pytest tests/int",
+                "level": "integration",
+                "real_dependencies": ["none"],
+                "must_fail_on_base": True,
+            }],
+            "runtime_data_policy": "real-or-error",
+        },
+        "pr_base": "main",
+    }
+
+
 def _basic_nodes():
     return [
         {"id": "a", "worker": "alice", "status": "done",
@@ -156,6 +189,8 @@ def test_retry_reassignment_survives_reconcile_and_dispatches_new_worker(
     path = _write_manifest(tmp_path, [{
         "id": "b",
         "worker": "bob",
+        "reviewer": "alice",
+        "contract": _complete_contract_raw(),
         "status": "blocked",
         "work_item_id": item.id,
     }])

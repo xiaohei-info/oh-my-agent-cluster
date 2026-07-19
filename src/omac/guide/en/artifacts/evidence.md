@@ -39,6 +39,7 @@ coverage: 92
 env_setup:
   - "docker compose up -d db"
 quality:
+  delivered_revision: def456
   outcome_mapping:
     - outcome: login-succeeds
       implementation: [src/auth/login.py]
@@ -109,6 +110,7 @@ nits: []
 | `pr_base` | Exactly matches contract `pr_base`. |
 | `coverage` | Numeric coverage meeting `coverage_gate`. |
 | `env_setup` | Reproducible preparation steps; non-empty strings when the contract has integration gates. |
+| `quality.delivered_revision` | Exact PR head revision delivered by the Worker; it must match the platform's current PR head at submission. |
 | `quality.outcome_mapping` | Real implementation and business-test files for every required outcome. |
 | `quality.regression_proof` | Base/head revisions and exit codes for each business test; the base fails when required and head passes. |
 | `quality.runtime_fallbacks` / `known_gaps` | Both empty; fake/mock/synthetic runtime fallbacks or incomplete requirements cannot be submitted as complete. |
@@ -153,13 +155,16 @@ Submit verdict through `--verdict`, not report YAML. Valid values are `pass`,
 4. Metrics meet thresholds and required artifacts are present.
 5. With integration gates, `env_setup` is a non-empty list of non-empty strings.
 6. PR base matches and coverage is numeric and at least the gate.
-7. Outcome mappings and regression proofs are complete; runtime fallbacks and
+7. `quality.delivered_revision` matches the current PR head, and every regression
+   proof `head_ref` matches that revision.
+8. Outcome mappings and regression proofs are complete; runtime fallbacks and
    known gaps are empty; evidence origin is `real`.
 
 ### Reviewer report
 
-1. `reviewed_revision` and `review_goals` are present; review scope lists changed
-   files and all four completeness flags are true.
+1. `reviewed_revision` and `review_goals` are present; `reviewed_revision`
+   matches both Worker `quality.delivered_revision` and the current PR head;
+   review scope lists changed files and all four completeness flags are true.
 2. The reviewer completes all changed files, outcomes, real business tests, and
    fake/runtime-fallback audit in one sweep and submits one complete finding batch.
 3. Findings are complete and uniquely identified; blockers and nits exactly
@@ -168,8 +173,9 @@ Submit verdict through `--verdict`, not report YAML. Valid values are `pass`,
 5. `pass` has no findings; `pass-with-nits` has nit findings only; `reject` has
    at least one blocker finding.
 6. Existing `pass-with-nits` flow remains: one worker follow-up and no second
-   reviewer, so functional, contract, integrity, security, or verification
-   defects must be `reject`.
+   reviewer. The Worker must submit a new PR revision, different from the reviewed
+   revision, with complete fresh evidence; functional, contract, integrity,
+   security, or verification defects must therefore be `reject`.
 
 ### Final acceptance results
 
@@ -186,6 +192,7 @@ Submit verdict through `--verdict`, not report YAML. Valid values are `pass`,
 | Reviewer reuses worker claims | Rebuild from `env_setup` and record independent mapping. |
 | Worker returns fake data to make an error path succeed | Remove the runtime fallback and expose the real error; `runtime_fallbacks` stays empty. |
 | Reviewer stops after the first issue | Finish the full revision scope and submit one complete findings batch. |
+| Worker or Reviewer reuses evidence from an old commit | Read the current PR head again; Worker updates `delivered_revision` and regression `head_ref`, and Reviewer reports that same revision only. |
 | Pass verdict retains blockers | Empty blockers; submit reject if a blocker remains. |
 | Reject has no actionable reason | State failure fact, effect, and repair entry point in blockers. |
 | Final acceptance omits or invents a flow ID | Generate results strictly from the acceptance document. |

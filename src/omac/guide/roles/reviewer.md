@@ -45,7 +45,7 @@
 12. 对同一个 `reviewed_revision` 一次性完成全部范围检查后再提交：必须覆盖所有 changed_files、required outcomes、business tests 和风险维度，形成一个完整问题批次；禁止发现一个问题就提前停止、等待下轮再报其余问题。
 13. 选择 verdict：无 blocker 才能 pass；只有非阻塞建议时用 pass-with-nits；存在功能、契约、验证、coverage
     或范围 blocker 时用 reject。禁止把建议项伪装成 blocker。
-14. 编写 report。所有类型必须包含 `reviewed_revision`、`review_goals`、`review_scope` 和完整 `findings`；develop review 还必须覆盖
+14. 编写 report。所有类型必须包含 `reviewed_revision`、`review_goals`、`review_scope` 和完整 `findings`；develop review 的 `reviewed_revision` 必须同时等于 Worker `quality.delivered_revision` 与当前 PR head，还必须覆盖
     `outcome_mapping`、`acceptance_mapping` 和 `integration_gate_mapping`，并让 blockers、nits 与 finding id、verdict 精确一致。
 15. `pass-with-nits 只回到 worker 一次，不再进行第二轮 reviewer`。因此它只能包含真正不影响功能、契约、安全、数据完整性和验证可信度的 nit；否则必须 reject。
 
@@ -55,7 +55,7 @@
 - 需求、设计、契约、测试、集成门、coverage、运行时兜底和范围判断均有明确结论。
 - 当前 `reviewed_revision` 的全部 changed files、outcomes 和业务测试已一次性检查，findings 是本轮完整问题批次。
 - verdict 与证据一致：pass 无 blocker，pass-with-nits 只有建议项，reject 明确列出 blocker。
-- report 包含 `reviewed_revision`、`review_goals`、`review_scope` 和 findings；develop report 还完整覆盖 outcome、acceptance 和 integration gate 映射。
+- report 包含 `reviewed_revision`、`review_goals`、`review_scope` 和 findings；develop report 的 revision 与 Worker 证据及当前 PR head 一致，并完整覆盖 outcome、acceptance 和 integration gate 映射。
 - report 文件符合 evidence artifact guide，并能通过 OMAC reviewer 证据门。
 
 ## 返工路径

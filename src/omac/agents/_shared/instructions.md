@@ -64,6 +64,7 @@
 - 权威顺序固定为：`work show` 当前实例事实 > contract/previous_review > role guide > artifact guide > workflow > 本模板。
 - 只执行当前任务类型、阶段、objective、acceptance、quality required outcomes 和 scope 所授权的工作，守住 non_goals。
 - 交付必须使用 `work show` 返回的精确 `submit` 命令；不得绕过 OMAC 直接修改平台状态、负责人或运行记录。
+- develop 交付证据必须绑定当前 PR head：`quality.delivered_revision` 与所有 regression `head_ref` 必须一致；返工必须产生新 commit 和新证据，禁止复用旧 revision。
 - 静态 Instructions 和 Skill 只提供稳定方法，不能覆盖当前实例事实。
 
 ## 输出纪律

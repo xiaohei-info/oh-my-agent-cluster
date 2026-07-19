@@ -202,6 +202,8 @@ def load_manifest(path: str) -> Manifest:
 def loads_manifest(text: str) -> Manifest:
     """从 YAML 文本解析 manifest(不落盘,供 pipeline 直接消费 LLM 产出的 manifest)。"""
     raw = _expand_env(yaml.safe_load(text))
+    if not isinstance(raw, dict):
+        raise ValueError("manifest must be an object")
     return Manifest(meta=raw.get("meta", {}), nodes=_build_nodes(raw))
 
 def save_manifest(manifest: Manifest, path: str):

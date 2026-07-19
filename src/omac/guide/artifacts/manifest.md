@@ -103,7 +103,7 @@ nodes:
 |---|---|
 | `id` | manifest 内唯一、稳定的节点标识。 |
 | `title` / `description` | 简短说明；`description` 只放事实源锚点，不复制设计正文。 |
-| `worker` / `reviewer` | 必须来自实例 agent pool，且 reviewer 不得与 worker 相同。 |
+| `worker` / `reviewer` | 两者都必填，必须来自实例 agent pool，且 reviewer 不得与 worker 相同。 |
 | `blocked_by` | 真实运行前置节点 id 列表；无前置时使用空列表。 |
 | `work_item_id` / `status` | 运行时回填的工作项和状态；authoring 时不要凭空伪造。 |
 | `contract` | 节点唯一实施与评审合同。 |
@@ -148,8 +148,8 @@ verification 中说明原因。reviewer 应判断这些改动是否服务于 con
 
 ## 校验硬门
 
-1. YAML 必须可解析；每个节点必须有 `id` 和 `worker`。
-2. worker/reviewer 必须在 agent pool 内，且 reviewer 与 worker 不同。
+1. YAML 必须可解析；每个节点必须有 `id`、`worker`、独立 `reviewer` 和完整 `contract`。
+2. worker/reviewer 必须在 agent pool 内，且 reviewer 与 worker 不同；缺失 reviewer 或自审节点直接失败。
 3. `blocked_by` 只能引用有效节点，完整 DAG 不得有环；增量节点 id 不得与既有节点冲突。
 4. contract 的 `objective`、`source_of_truth`、`acceptance`、`non_goals`、
    `verification_commands`、`integration_gates`、`pr_base` 必须非空。

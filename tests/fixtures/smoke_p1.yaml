@@ -10,6 +10,7 @@ nodes:
     title: "Node A - foundation"
     description: "Lock-step foundation node with no deps."
     worker: alice
+    reviewer: bob
     blocked_by: []
     contract:
       objective: "Foundation works"
@@ -81,6 +82,7 @@ nodes:
     title: "Node C - final"
     description: "Final node, blocked by smoke-B."
     worker: alice
+    reviewer: bob
     blocked_by: [smoke-B]
     contract:
       objective: "Final works"

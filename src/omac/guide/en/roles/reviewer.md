@@ -62,7 +62,8 @@ conflict or cannot be reproduced, do not infer pass.
     suggestions, and `reject` for functional, contract, verification, coverage,
     or scope blockers.
 14. Write `reviewed_revision`, `review_goals`, `review_scope`, and complete
-    `findings`. Develop review also includes outcome, acceptance, and integration
+    `findings`. For develop review, `reviewed_revision` matches both Worker
+    `quality.delivered_revision` and the current PR head. Develop review also includes outcome, acceptance, and integration
     gate mappings; blocker/nit lists exactly match finding IDs and verdict.
 15. `pass-with-nits` returns to the worker once and has no second reviewer.
     Therefore it is only for issues with no functional, contract, security,

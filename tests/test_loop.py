@@ -103,6 +103,7 @@ def _contract(
 def _verification(
     *, command="pytest -q", gate_command="pytest tests/int",
     gate_name="gate-1", pr_base="feature/v1", coverage=95,
+    delivered_revision="head-sha",
 ):
     return {
         "commands": [{"cmd": command, "exit_code": 0}],
@@ -118,6 +119,7 @@ def _verification(
         "pr_base": pr_base,
         "coverage": coverage,
         "quality": {
+            "delivered_revision": delivered_revision,
             "outcome_mapping": [{
                 "outcome": "outcome-works",
                 "implementation": ["src/feature.py"],
@@ -126,7 +128,7 @@ def _verification(
             "regression_proof": [{
                 "test_id": "business-works",
                 "base_ref": "base-sha", "base_exit_code": 1,
-                "head_ref": "head-sha", "head_exit_code": 0,
+                "head_ref": delivered_revision, "head_exit_code": 0,
             }],
             "runtime_fallbacks": [], "known_gaps": [],
             "evidence_origin": "real",
@@ -180,13 +182,19 @@ def _review_report(verdict="pass"):
     }
 
 
-def _node(key, worker="alice", blocked_by=None, reviewer=None, contract=None, title=None):
+_DEFAULT = object()
+
+
+def _node(
+    key, worker="alice", blocked_by=None, reviewer=_DEFAULT,
+    contract=_DEFAULT, title=None,
+):
     return Node(
         id=key,
         worker=worker,
         blocked_by=blocked_by or [],
-        reviewer=reviewer,
-        contract=contract,
+        reviewer="bob" if reviewer is _DEFAULT else reviewer,
+        contract=_contract() if contract is _DEFAULT else contract,
         title=title or key,
         description=f"Task {key}",
     )
@@ -508,9 +516,13 @@ class TestIdempotency:
         r1 = tick(eng.store, eng.runtime, manifest, path)
         assert "a" in r1.dispatched
 
-        # 第二轮 tick:a 完成,b 派发
+        # 第二轮 tick:a 的 Worker 交付完成并派发 Reviewer
         r2 = tick(eng.store, eng.runtime, manifest, path)
-        assert "a" in r2.done
+        assert "a" in r2.running
+
+        # 第三轮 tick:Reviewer 完成,a 收敛并派发 b
+        r3 = tick(eng.store, eng.runtime, manifest, path)
+        assert "a" in r3.done
 
         # 记录 a 的 work_item_id
         a_item_id = manifest.nodes["a"].work_item_id
@@ -552,19 +564,18 @@ class TestIdempotency:
 # ==================== 4. reviewer 阶段交接 ====================
 
 class TestReviewerHandoff:
-    def test_no_reviewer_direct_done(self):
-        """无 reviewer 节点:worker 完成 → 直接 done。"""
-        nodes = [_node("a", reviewer=None)]
+    def test_missing_reviewer_is_blocked_before_delivery(self):
+        """develop 节点缺少独立 reviewer 时不得派发或完成。"""
+        nodes = [_node("a", reviewer=None, contract=_contract())]
         manifest = _manifest(nodes)
         path = _tmp_manifest_path(manifest)
         eng = _engine()
 
         result = _loop_to_settle(eng.store, eng.runtime, manifest, path)
 
-        assert result.state == "converged"
-        assert "a" in result.done
-        # 不经过 in_review
-        # (mock 自动完成 → done,collect_results 直接标 done)
+        assert result.state == "needs_decision"
+        assert "a" in result.failed
+        assert manifest.nodes["a"].status == "blocked"
 
     def test_with_reviewer_goes_through_in_review(self):
         """有 reviewer 节点:worker 完成 → in_review → reviewer pass → done。"""
@@ -880,8 +891,8 @@ class TestEvidenceGateRegression:
         # assign_log 含 reviewer 分配
         assert any(role == "reviewer" for _, _, role, _ in eng.store.assign_log)
 
-    def test_valid_evidence_without_reviewer_direct_done(self):
-        """worker DONE + 合规证据 + 无 reviewer → 直接 done。"""
+    def test_valid_evidence_without_reviewer_is_blocked(self):
+        """即使 Worker 证据合法，缺少独立 reviewer 也不得完成。"""
         contract = _contract()
         nodes = [_node("a", reviewer=None, contract=contract)]
         manifest = _manifest(nodes)
@@ -900,9 +911,22 @@ class TestEvidenceGateRegression:
 
         result = tick(eng.store, eng.runtime, manifest, path)
 
-        assert result.state == "converged"
-        assert "a" in result.done
-        assert manifest.nodes["a"].status == "done"
+        assert result.state == "needs_decision"
+        assert "a" in result.failed
+        assert manifest.nodes["a"].status == "blocked"
+
+    def test_missing_contract_is_blocked_before_worker_evidence(self):
+        """develop 节点缺少 contract 时不能绕过 quality evidence。"""
+        nodes = [_node("a", reviewer="bob", contract=None)]
+        manifest = _manifest(nodes)
+        path = _tmp_manifest_path(manifest)
+        eng = _engine()
+
+        result = _loop_to_settle(eng.store, eng.runtime, manifest, path)
+
+        assert result.state == "needs_decision"
+        assert "a" in result.failed
+        assert manifest.nodes["a"].status == "blocked"
 
 
 # ==================== AITEAM-354:reviewer reject 有界回退受 retry.review 控制 ====================
@@ -1034,7 +1058,8 @@ class TestReviewerRejectBoundedFallback:
             item.id,
             artifacts={"pr_url": f"https://mock.example.com/pr/{item.id}"},
             verification=_verification(
-                gate_command="pytest -q", pr_base="main", coverage=90),
+                gate_command="pytest -q", pr_base="main", coverage=90,
+                delivered_revision="head-sha-nits"),
         )
         eng.store.update_status(item.id, WorkItemStatus.DONE)
         second = tick(eng.store, eng.runtime, manifest, path, max_parallel=4)

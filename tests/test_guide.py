@@ -118,6 +118,7 @@ def test_worker_role_has_tdd_and_evidence() -> None:
         "TDD", "contract.source_of_truth", "上游 issue", "deliverable/ref",
         "verification", "pr_base", "non_goals", "真实业务功能测试",
         "骨架", "临时实现", "fake", "known_gaps", "runtime_fallbacks",
+        "delivered_revision",
     ]:
         assert item in content, f"worker missing execution anchor: {item}"
 
@@ -152,7 +153,7 @@ def test_acceptance_artifact_defines_flow_action_schema() -> None:
     content = load_artifact_topic("acceptance")
     for item in [
         "schema: omac.acceptance/v1", "flows", "actions", "action.id",
-        "flow-login.open-login", "step", "how", "expected",
+        "flow-login.open-login", "[A-Za-z0-9][A-Za-z0-9_-]*", "step", "how", "expected",
     ]:
         assert item in content, f"acceptance artifact missing schema anchor: {item}"
 
@@ -227,7 +228,7 @@ def test_evidence_artifact_defines_all_evidence_shapes() -> None:
     for item in [
         "worker verification", "reviewer report", "final acceptance results",
         "acceptance_mapping", "outcome_mapping", "regression_proof",
-        "evidence_origin", "reviewed_revision", "review_scope", "findings",
+        "evidence_origin", "delivered_revision", "reviewed_revision", "review_scope", "findings",
     ]:
         assert item in content, f"evidence artifact missing evidence anchor: {item}"
 

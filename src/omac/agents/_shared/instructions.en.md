@@ -72,6 +72,9 @@ Apply these principles:
 - Work only within the current task type, stage, objective, acceptance criteria,
   quality required outcomes, scope, and non-goals.
 - Submit with the exact command returned by `work show`. Do not bypass OMAC to edit platform status, assignees, or run records.
+- Develop evidence is bound to the current PR head: `quality.delivered_revision`
+  matches every regression `head_ref`; rework creates a new commit and fresh
+  evidence instead of reusing an old revision.
 - Static Instructions and Skills describe durable methods; they never override current instance facts.
 
 ## Reporting

@@ -37,6 +37,7 @@ coverage: 92
 env_setup:
   - "docker compose up -d db"
 quality:
+  delivered_revision: def456
   outcome_mapping:
     - outcome: login-succeeds
       implementation: [src/auth/login.py]
@@ -107,6 +108,7 @@ nits: []
 | `pr_base` | 必须与 contract `pr_base` 完全一致。 |
 | `coverage` | 数字覆盖率，必须达到 contract `coverage_gate`。 |
 | `env_setup` | 可复跑的环境准备步骤；contract 声明 integration gates 时必须是非空字符串列表。 |
+| `quality.delivered_revision` | Worker 本次交付对应的精确 PR head revision；必须与提交时平台读取到的当前 PR head 一致。 |
 | `quality.outcome_mapping` | contract 每个 required outcome 对应的真实实现文件和真实业务测试文件。 |
 | `quality.regression_proof` | 每个 business test 的基线/当前 revision 与退出码；要求基线按合同失败、当前 revision 通过。 |
 | `quality.runtime_fallbacks` / `known_gaps` | 必须为空；存在 fake/mock/synthetic 运行时兜底或未完成需求时不得提交完成。 |
@@ -151,16 +153,17 @@ verdict 不写入 report YAML，而是通过 submit 的 `--verdict` 提交；合
 4. metrics 必须达到 contract 阈值，contract 要求的 artifacts 必须全部出现。
 5. contract 声明 integration gates 时，`env_setup` 必须非空且每项都是非空字符串。
 6. `pr_base` 必须匹配，`coverage` 必须是数字且不低于 coverage gate。
-7. outcome mapping 和 regression proof 必须完整；`runtime_fallbacks`、`known_gaps` 为空，`evidence_origin` 为 `real`。
+7. `quality.delivered_revision` 必须等于当前 PR head，且每条 regression proof 的 `head_ref` 必须等于该 revision。
+8. outcome mapping 和 regression proof 必须完整；`runtime_fallbacks`、`known_gaps` 为空，`evidence_origin` 为 `real`。
 
 ### reviewer report
 
-1. `reviewed_revision`、`review_goals` 必填；review scope 必须列出 changed files，四个完整性标志全部为 true。
+1. `reviewed_revision`、`review_goals` 必填；`reviewed_revision` 必须同时等于 Worker 的 `quality.delivered_revision` 和当前 PR head；review scope 必须列出 changed files，四个完整性标志全部为 true。
 2. Reviewer 必须对该 revision 一次性完成全部 changed files、outcomes、真实业务测试和 fake/runtime fallback 审计，提交一个完整问题批次，不得发现一个就提前停止。
 3. 每个 finding 结构完整且 id 唯一；`blockers`、`nits` 必须精确等于对应 severity 的 finding id。
 4. outcome、acceptance 和 integration gate mapping 必须完整；命令、指标、产物、事实源和交付目标通过校验。
 5. `pass` 必须零 findings；`pass-with-nits` 只能有 nit findings；`reject` 至少有一个 blocker finding。
-6. `pass-with-nits` 沿用既有流程：只回到 worker 一次，不再进行第二轮 reviewer，因此任何功能、契约、数据完整性、安全或验证问题都必须 reject。
+6. `pass-with-nits` 沿用既有流程：只回到 worker 一次，不再进行第二轮 reviewer；Worker 必须提交一个不同于已评审 revision 的新 PR revision 和完整新证据，因此任何功能、契约、数据完整性、安全或验证问题都必须 reject。
 
 ### final acceptance results
 
@@ -177,6 +180,7 @@ verdict 不写入 report YAML，而是通过 submit 的 `--verdict` 提交；合
 | reviewer 复用 worker 声明，没有独立复跑 | reviewer 按 env_setup 重建环境并记录自己的 mapping。 |
 | Worker 用假数据让失败路径返回成功 | 删除运行时兜底并暴露真实错误；`runtime_fallbacks` 只能为空。 |
 | Reviewer 发现一个问题就停止 | 完成本 revision 的全部范围扫描，一次提交完整 findings 批次。 |
+| Worker 或 Reviewer 复用旧 commit 的证据 | 重新读取当前 PR head；Worker 更新 `delivered_revision` 与 regression `head_ref`，Reviewer 仅评审并填写该同一 revision。 |
 | pass verdict 仍保留 blockers | 清空 blockers；若确有阻塞则提交 reject。 |
 | reject 没有可执行阻塞原因 | 在 blockers 写明失败事实、影响和修正入口。 |
 | 最终验收漏掉一个 flow 或额外创造 id | 严格按 acceptance 文档逐项生成结果。 |

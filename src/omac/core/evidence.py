@@ -14,19 +14,32 @@ REVIEW_VERDICTS = REVIEW_APPROVE | {"reject"}
 ACCEPTANCE_STATUS = {"pass", "fail"}
 
 
-def _commands_by_text(commands):
+def _commands_by_text(commands, *, prefix):
+    errors = []
     if not isinstance(commands, list) or not commands:
-        return None
-    return {
-        command.get("cmd"): command
-        for command in commands
-        if isinstance(command, dict) and command.get("cmd")
-    }
+        return None, errors
+    result = {}
+    for index, command in enumerate(commands):
+        item_prefix = f"{prefix}[{index}]"
+        if not isinstance(command, dict):
+            errors.append(f"{item_prefix} must be an object")
+            continue
+        cmd = command.get("cmd")
+        if not isinstance(cmd, str) or not cmd.strip():
+            errors.append(f"{item_prefix}.command cmd must be a non-empty string")
+            continue
+        if cmd in result:
+            errors.append(f"{prefix} duplicate command: {cmd}")
+        result[cmd] = command
+    return result, errors
 
 
 def _validate_expected_commands(command_by_text, expected_commands, *, missing_prefix, failed_prefix):
     errors = []
     for expected_cmd in expected_commands:
+        if not isinstance(expected_cmd, str) or not expected_cmd.strip():
+            errors.append(f"{missing_prefix}: contract command must be a non-empty string")
+            continue
         actual = command_by_text.get(expected_cmd) if command_by_text is not None else None
         if actual is None:
             errors.append(f"{missing_prefix}: {expected_cmd}")
@@ -42,7 +55,11 @@ def _gate_by_name(gates):
     return {
         gate.get("name"): gate
         for gate in gates
-        if isinstance(gate, dict) and gate.get("name")
+        if (
+            isinstance(gate, dict)
+            and isinstance(gate.get("name"), str)
+            and gate.get("name").strip()
+        )
     }
 
 
@@ -56,11 +73,17 @@ def _metric_satisfies(actual, expected) -> bool:
 
 def _validate_integration_gate_evidence(expected_gate, actual_gate, *, prefix):
     errors = []
+    if not isinstance(expected_gate, dict):
+        return [f"{prefix} contract integration gate must be an object"]
     gate_name = expected_gate.get("name")
-    if actual_gate is None:
+    if not isinstance(actual_gate, dict):
         return [f"{prefix} missing integration gate: {gate_name}"]
 
-    command_by_text = _commands_by_text(actual_gate.get("commands"))
+    command_by_text, command_errors = _commands_by_text(
+        actual_gate.get("commands"),
+        prefix=f"{prefix}.integration_gates[{gate_name}].commands",
+    )
+    errors.extend(command_errors)
     if command_by_text is None:
         errors.append(f"{prefix} integration gate commands must be non-empty: {gate_name}")
     else:
@@ -77,13 +100,20 @@ def _validate_integration_gate_evidence(expected_gate, actual_gate, *, prefix):
     if not isinstance(actual_metrics, dict):
         errors.append(f"{prefix} integration gate metrics must be an object: {gate_name}")
         actual_metrics = {}
-    for metric, expected_value in expected_gate.get("required_metrics", {}).items():
+    expected_metrics = expected_gate.get("required_metrics", {})
+    if not isinstance(expected_metrics, dict):
+        errors.append(f"{prefix} contract integration metrics must be an object: {gate_name}")
+        expected_metrics = {}
+    for metric, expected_value in expected_metrics.items():
         if metric not in actual_metrics:
             errors.append(f"{prefix} missing integration metric for {gate_name}: {metric}")
         elif not _metric_satisfies(actual_metrics.get(metric), expected_value):
             errors.append(f"{prefix} integration metric below gate for {gate_name}: {metric}")
 
     expected_artifacts = expected_gate.get("artifacts", [])
+    if not isinstance(expected_artifacts, list):
+        errors.append(f"{prefix} contract integration artifacts must be a list: {gate_name}")
+        expected_artifacts = []
     if expected_artifacts:
         actual_artifacts = actual_gate.get("artifacts")
         if not isinstance(actual_artifacts, list):
@@ -129,7 +159,23 @@ def _matches_finding_ids(value, expected_ids: set[str]) -> bool:
     )
 
 
-def _validate_worker_quality(contract, verification, *, allow_mock_evidence=False) -> list:
+def delivered_revision_of(verification):
+    if not isinstance(verification, dict):
+        return None
+    quality = verification.get("quality")
+    if not isinstance(quality, dict):
+        return None
+    revision = quality.get("delivered_revision")
+    return revision.strip() if isinstance(revision, str) and revision.strip() else None
+
+
+def _validate_worker_quality(
+    contract,
+    verification,
+    *,
+    allow_mock_evidence=False,
+    expected_revision=None,
+) -> list:
     errors = []
     expected_quality = getattr(contract, "quality", None)
     actual_quality = verification.get("quality")
@@ -138,11 +184,26 @@ def _validate_worker_quality(contract, verification, *, allow_mock_evidence=Fals
     if not isinstance(actual_quality, dict):
         return ["verification.quality is required"]
 
-    expected_outcomes = {
-        outcome.get("id")
-        for outcome in expected_quality.required_outcomes
-        if isinstance(outcome, dict) and outcome.get("id")
-    }
+    delivered_revision = delivered_revision_of(verification)
+    if delivered_revision is None:
+        errors.append("verification.quality.delivered_revision is required")
+    elif expected_revision and delivered_revision != expected_revision:
+        errors.append(
+            "verification.quality.delivered_revision must match current PR head: "
+            f"expected {expected_revision}, got {delivered_revision}"
+        )
+
+    expected_outcomes = set()
+    required_outcomes = expected_quality.required_outcomes
+    if not isinstance(required_outcomes, list):
+        errors.append("contract quality required_outcomes must be a list")
+        required_outcomes = []
+    for outcome in required_outcomes:
+        outcome_id = outcome.get("id") if isinstance(outcome, dict) else None
+        if not isinstance(outcome_id, str) or not outcome_id.strip():
+            errors.append("contract quality outcome id must be a non-empty string")
+            continue
+        expected_outcomes.add(outcome_id)
     mappings = actual_quality.get("outcome_mapping")
     mapping_by_outcome = {}
     if not isinstance(mappings, list):
@@ -169,11 +230,17 @@ def _validate_worker_quality(contract, verification, *, allow_mock_evidence=Fals
     for outcome_id in sorted(expected_outcomes - set(mapping_by_outcome)):
         errors.append(f"verification.quality missing outcome mapping: {outcome_id}")
 
-    expected_tests = {
-        business_test.get("id"): business_test
-        for business_test in expected_quality.business_tests
-        if isinstance(business_test, dict) and business_test.get("id")
-    }
+    expected_tests = {}
+    business_tests = expected_quality.business_tests
+    if not isinstance(business_tests, list):
+        errors.append("contract quality business_tests must be a list")
+        business_tests = []
+    for business_test in business_tests:
+        test_id = business_test.get("id") if isinstance(business_test, dict) else None
+        if not isinstance(test_id, str) or not test_id.strip():
+            errors.append("contract quality business test id must be a non-empty string")
+            continue
+        expected_tests[test_id] = business_test
     proofs = actual_quality.get("regression_proof")
     proof_by_test = {}
     if not isinstance(proofs, list):
@@ -201,6 +268,11 @@ def _validate_worker_quality(contract, verification, *, allow_mock_evidence=Fals
             errors.append(f"{prefix}.base_ref is required")
         if not isinstance(head_ref, str) or not head_ref.strip():
             errors.append(f"{prefix}.head_ref is required")
+        elif delivered_revision and head_ref != delivered_revision:
+            errors.append(
+                f"{prefix}.head_ref must match delivered_revision: "
+                f"expected {delivered_revision}, got {head_ref}"
+            )
         if base_ref and head_ref and base_ref == head_ref:
             errors.append(f"{prefix}.base_ref and head_ref must differ")
         base_exit_code = proof.get("base_exit_code")
@@ -302,11 +374,17 @@ def _validate_review_batch(contract, verdict, report) -> list:
         errors.append("contract.quality is required")
         expected_outcomes = set()
     else:
-        expected_outcomes = {
-            outcome.get("id")
-            for outcome in quality.required_outcomes
-            if isinstance(outcome, dict) and outcome.get("id")
-        }
+        expected_outcomes = set()
+        required_outcomes = quality.required_outcomes
+        if not isinstance(required_outcomes, list):
+            errors.append("contract quality required_outcomes must be a list")
+            required_outcomes = []
+        for outcome in required_outcomes:
+            outcome_id = outcome.get("id") if isinstance(outcome, dict) else None
+            if not isinstance(outcome_id, str) or not outcome_id.strip():
+                errors.append("contract quality outcome id must be a non-empty string")
+                continue
+            expected_outcomes.add(outcome_id)
     outcome_mappings = report.get("outcome_mapping")
     mapping_by_outcome = {}
     if not isinstance(outcome_mappings, list):
@@ -334,7 +412,13 @@ def _validate_review_batch(contract, verdict, report) -> list:
     return errors
 
 
-def validate_worker_evidence(node, item, *, allow_mock_evidence: bool = False) -> list:
+def validate_worker_evidence(
+    node,
+    item,
+    *,
+    allow_mock_evidence: bool = False,
+    expected_revision: str | None = None,
+) -> list:
     """Return gate failure messages for worker artifacts + verification."""
     errors = []
     contract = getattr(node, "contract", None)
@@ -350,7 +434,9 @@ def validate_worker_evidence(node, item, *, allow_mock_evidence: bool = False) -
         errors.append("verification is required")
         return errors
 
-    command_by_text = _commands_by_text(verification.get("commands"))
+    command_by_text, command_errors = _commands_by_text(
+        verification.get("commands"), prefix="verification.commands")
+    errors.extend(command_errors)
     if command_by_text is None:
         errors.append("verification.commands must be non-empty")
     else:
@@ -367,7 +453,11 @@ def validate_worker_evidence(node, item, *, allow_mock_evidence: bool = False) -
     if integration_gate_by_name is None:
         errors.append("verification.integration_gates must be non-empty")
     else:
-        for expected_gate in contract.integration_gates:
+        expected_gates = contract.integration_gates
+        if not isinstance(expected_gates, list):
+            errors.append("contract.integration_gates must be a list")
+            expected_gates = []
+        for expected_gate in expected_gates:
             errors.extend(
                 _validate_integration_gate_evidence(
                     expected_gate,
@@ -400,12 +490,29 @@ def validate_worker_evidence(node, item, *, allow_mock_evidence: bool = False) -
         contract,
         verification,
         allow_mock_evidence=allow_mock_evidence,
+        expected_revision=expected_revision,
     ))
+
+    previous_review = getattr(item, "review_report", None)
+    if (
+        getattr(item, "review_verdict", None) == "pass-with-nits"
+        and isinstance(previous_review, dict)
+        and previous_review.get("reviewed_revision")
+        == delivered_revision_of(verification)
+    ):
+        errors.append(
+            "pass-with-nits follow-up must submit a new revision with fresh evidence"
+        )
 
     return errors
 
 
-def validate_review_evidence(node, item) -> list:
+def validate_review_evidence(
+    node,
+    item,
+    *,
+    expected_revision: str | None = None,
+) -> list:
     """Return gate failure messages for structured reviewer verdict/report."""
     errors = []
     verdict = getattr(item, "review_verdict", None)
@@ -439,6 +546,20 @@ def validate_review_evidence(node, item) -> list:
 
     errors.extend(_validate_review_batch(contract, verdict, report))
 
+    reviewed_revision = report.get("reviewed_revision")
+    delivered_revision = delivered_revision_of(
+        getattr(item, "verification", None))
+    if delivered_revision and reviewed_revision != delivered_revision:
+        errors.append(
+            "review_report.reviewed_revision must match Worker delivered_revision: "
+            f"expected {delivered_revision}, got {reviewed_revision}"
+        )
+    if expected_revision and reviewed_revision != expected_revision:
+        errors.append(
+            "review_report.reviewed_revision must match current PR head: "
+            f"expected {expected_revision}, got {reviewed_revision}"
+        )
+
     mappings = report.get("acceptance_mapping")
     if not isinstance(mappings, list) or not mappings:
         errors.append("review_report.acceptance_mapping must be non-empty")
@@ -448,7 +569,12 @@ def validate_review_evidence(node, item) -> list:
     mapped_acceptance = {
         mapping.get("acceptance")
         for mapping in mappings
-        if isinstance(mapping, dict) and mapping.get("status") in required_statuses
+        if (
+            isinstance(mapping, dict)
+            and isinstance(mapping.get("acceptance"), str)
+            and mapping.get("acceptance").strip()
+            and mapping.get("status") in required_statuses
+        )
     }
     if contract is not None:
         for acceptance in contract.acceptance:
@@ -463,13 +589,23 @@ def validate_review_evidence(node, item) -> list:
             mapping_by_gate = {
                 mapping.get("gate"): mapping
                 for mapping in integration_mappings
-                if isinstance(mapping, dict) and mapping.get("status") == "pass"
+                if (
+                    isinstance(mapping, dict)
+                    and isinstance(mapping.get("gate"), str)
+                    and mapping.get("gate").strip()
+                    and mapping.get("status") == "pass"
+                )
             }
-            for expected_gate in contract.integration_gates:
+            expected_gates = contract.integration_gates
+            if not isinstance(expected_gates, list):
+                errors.append("contract.integration_gates must be a list")
+                expected_gates = []
+            for expected_gate in expected_gates:
+                gate_name = expected_gate.get("name") if isinstance(expected_gate, dict) else None
                 errors.extend(
                     _validate_integration_gate_evidence(
                         expected_gate,
-                        mapping_by_gate.get(expected_gate.get("name")),
+                        mapping_by_gate.get(gate_name),
                         prefix="review_report",
                     )
                 )

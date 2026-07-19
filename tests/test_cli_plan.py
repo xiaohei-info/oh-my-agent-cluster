@@ -25,6 +25,7 @@ meta:
 nodes:
   - id: a
     worker: alice
+    reviewer: bob
     contract:
       objective: 实现 a
       acceptance: ["a 可运行"]
@@ -108,7 +109,7 @@ def _write(tmp_path, content, name="m.yaml"):
     return str(p)
 
 
-def _configure_mock(tmp_path, monkeypatch, *, reviewers=("alice",)):
+def _configure_mock(tmp_path, monkeypatch, *, reviewers=("alice", "bob")):
     """写入最小 mock 配置(引擎 + 角色),返回建好的 mock engine。"""
     monkeypatch.chdir(tmp_path)
     assert main(["config", "set", "engine", "mock"]) == exit_codes.OK
@@ -371,6 +372,7 @@ meta:
 nodes:
   - id: login
     worker: alice
+    reviewer: bob
     contract:
       objective: 实现登录
       acceptance:
@@ -401,6 +403,7 @@ nodes:
       pr_base: feature/demo
   - id: dashboard
     worker: bob
+    reviewer: alice
     blocked_by: [login]
     contract:
       objective: 实现仪表盘

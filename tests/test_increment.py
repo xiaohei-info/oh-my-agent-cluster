@@ -9,7 +9,42 @@ from omac.core.manifest import (
 POOL = {"alice", "bob", "charlie"}
 
 
+def _contract(id):
+    return Contract(
+        objective=f"Deliver {id}",
+        source_of_truth=[f"docs/{id}.md"],
+        acceptance=[f"{id}-works"],
+        non_goals=["no scope creep"],
+        verification_commands=[f"pytest tests/{id}"],
+        integration_gates=[{
+            "name": f"{id}-gate", "layer": "L1",
+            "delivery_goal": f"{id} delivered",
+            "source_of_truth": [f"docs/{id}.md"],
+            "covers": [id], "acceptance_refs": [f"{id}-works"],
+            "commands": [f"pytest tests/int/{id}"],
+        }],
+        quality={
+            "required_outcomes": [{
+                "id": f"{id}-outcome",
+                "source_ref": f"acceptance#{id}.run",
+            }],
+            "business_tests": [{
+                "id": f"{id}-business",
+                "outcome_refs": [f"{id}-outcome"],
+                "command": f"pytest tests/int/{id}",
+                "level": "integration",
+                "real_dependencies": ["none"],
+                "must_fail_on_base": True,
+            }],
+            "runtime_data_policy": "real-or-error",
+        },
+        pr_base="main",
+    )
+
+
 def _node(id, worker="alice", **kw):
+    kw.setdefault("reviewer", "bob" if worker == "alice" else "alice")
+    kw.setdefault("contract", _contract(id))
     return Node(id=id, worker=worker, **kw)
 
 

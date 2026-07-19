@@ -8,7 +8,7 @@ import tempfile
 from structlog.testing import capture_logs
 
 from omac.core import logsetup
-from omac.core.manifest import Manifest, Node, save_manifest
+from omac.core.manifest import Contract, Manifest, Node, save_manifest
 from omac.engines import create_engine
 from omac.engines.models import EngineConfig
 from omac.pipeline.loop import tick
@@ -21,8 +21,41 @@ def _engine():
 
 
 def _node(key, blocked_by=None):
-    return Node(id=key, worker="alice", blocked_by=blocked_by or [],
-                title=key, description=f"Task {key}")
+    contract = Contract(
+        objective=f"Deliver {key}",
+        source_of_truth=[f"docs/{key}.md"],
+        acceptance=[f"{key}-works"],
+        non_goals=["no scope creep"],
+        verification_commands=[f"pytest tests/{key}"],
+        integration_gates=[{
+            "name": f"{key}-gate", "layer": "L1",
+            "delivery_goal": f"{key} delivered",
+            "source_of_truth": [f"docs/{key}.md"],
+            "covers": [key], "acceptance_refs": [f"{key}-works"],
+            "commands": [f"pytest tests/int/{key}"],
+        }],
+        quality={
+            "required_outcomes": [{
+                "id": f"{key}-outcome",
+                "source_ref": f"acceptance#{key}.run",
+            }],
+            "business_tests": [{
+                "id": f"{key}-business",
+                "outcome_refs": [f"{key}-outcome"],
+                "command": f"pytest tests/int/{key}",
+                "level": "integration",
+                "real_dependencies": ["none"],
+                "must_fail_on_base": True,
+            }],
+            "runtime_data_policy": "real-or-error",
+        },
+        pr_base="main",
+    )
+    return Node(
+        id=key, worker="alice", reviewer="bob",
+        blocked_by=blocked_by or [], title=key,
+        description=f"Task {key}", contract=contract,
+    )
 
 
 def _manifest(nodes):
@@ -38,7 +71,7 @@ def _path(manifest):
 
 def _settle(store, runtime, manifest, path):
     for _ in range(50):
-        r = tick(store, runtime, manifest, path)
+        r = tick(store, runtime, manifest, path, config={"engine": "mock"})
         if r.state != "running":
             return r
     raise AssertionError("did not settle")

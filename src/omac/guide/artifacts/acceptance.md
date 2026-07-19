@@ -41,10 +41,10 @@ flows:
 |---|---|
 | `schema` | 固定为 `omac.acceptance/v1`。 |
 | `flows` | 非空 flow 列表；每个 flow 是一个可独立验收的端到端路径。 |
-| `flow.id` | 唯一、稳定的标识，供 manifest `contract.acceptance` 和最终验收结果引用。 |
+| `flow.id` | 唯一、稳定的标识，格式为 `[A-Za-z0-9][A-Za-z0-9_-]*`，供 manifest `contract.acceptance` 和最终验收结果引用。 |
 | `flow.name` | 非空的人类可读名称，说明被验收的用户结果。 |
 | `actions` | 非空动作列表，按执行顺序描述 flow。 |
-| `action.id` | flow 内唯一、稳定的动作标识；质量契约使用 `flow.id.action.id` 引用，例如 `flow-login.open-login`。 |
+| `action.id` | flow 内唯一、稳定的动作标识，格式同 flow id；质量契约使用 `flow.id.action.id` 引用，例如 `flow-login.open-login`。id 本身禁止包含 `.`，避免 qualified id 冲突。 |
 | `step` | 用户或系统正在执行的动作。 |
 | `how` | 可复制的入口、命令、页面、参数或测试数据。 |
 | `expected` | 可观察结果以及据此判断失败的标准。 |
@@ -58,9 +58,9 @@ flows:
 ## 校验硬门
 
 1. 顶层必须是 mapping，`flows` 必须是非空列表。
-2. 每个 flow 必须是 object；`id` 和 `name` 必须是非空字符串，且 `id` 不得重复。
+2. 每个 flow 必须是 object；`id` 必须匹配 `[A-Za-z0-9][A-Za-z0-9_-]*`，`name` 必须是非空字符串，且 `id` 不得重复。
 3. 每个 flow 的 `actions` 必须是非空列表。
-4. 每个 action 必须是 object，且 `id`、`step`、`how`、`expected` 都是非空字符串；同一 flow 内 `action.id` 不得重复。
+4. 每个 action 必须是 object，`id` 必须匹配同一格式且不得包含 `.`, `step`、`how`、`expected` 都是非空字符串；同一 flow 内 `action.id` 不得重复。
 5. `flow.id` 和 `action.id` 必须稳定；manifest 的 `quality.required_outcomes.source_ref` 使用 `acceptance#<flow.id>.<action.id>` 精确引用。
 6. `flow.id` 必须与 design 的 flows、manifest 的 `contract.acceptance` 保持一致。
 7. 只写在说明性正文中的成功条件或边界条件不计入可校验验收事实。

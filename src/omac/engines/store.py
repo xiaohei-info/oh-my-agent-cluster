@@ -12,7 +12,10 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
 from ..core.taskmeta import Bounces, TaskKind, TaskPhase
-from .models import EngineConfig, ProjectInfo, WorkItem, WorkItemStatus, WorkspaceInfo
+from .models import (
+    EngineConfig, ProjectInfo, PullRequestSnapshot, WorkItem, WorkItemStatus,
+    WorkspaceInfo,
+)
 
 
 class WorkItemStore(ABC):
@@ -72,6 +75,10 @@ class WorkItemStore(ABC):
         description 落为 project 描述,init 用它写入 omac 编排横幅,让被派单
         agent 认清入口。
         """
+
+    @abstractmethod
+    def inspect_pull_request(self, pr_url: str) -> PullRequestSnapshot:
+        """返回 PR 当前 draft/state/head revision；平台调用封装在 adapter 内。"""
 
     # ==================== 工作单元 CRUD ====================
 

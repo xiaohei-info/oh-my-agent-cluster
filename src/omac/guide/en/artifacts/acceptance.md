@@ -42,10 +42,10 @@ flows:
 |---|---|
 | `schema` | Exactly `omac.acceptance/v1`. |
 | `flows` | Non-empty list of independently acceptable end-to-end paths. |
-| `flow.id` | Unique stable ID referenced by manifest `contract.acceptance` and final results. |
+| `flow.id` | Unique stable ID matching `[A-Za-z0-9][A-Za-z0-9_-]*`, referenced by manifest `contract.acceptance` and final results. |
 | `flow.name` | Non-empty human-readable user outcome. |
 | `actions` | Non-empty ordered actions for the flow. |
-| `action.id` | Stable ID unique within the flow. Quality contracts reference it as `flow.id.action.id`, for example `flow-login.open-login`. |
+| `action.id` | Stable ID unique within the flow and matching the same format. Quality contracts reference it as `flow.id.action.id`, for example `flow-login.open-login`; the ID itself cannot contain `.` because that would make qualified IDs ambiguous. |
 | `step` | The user or system action. |
 | `how` | Copyable entry point, command, page, parameter, or test data. |
 | `expected` | Observable outcome and the standard for deciding failure. |
@@ -58,10 +58,11 @@ duplicates, permissions, timeouts, and rollback as separate actions or flows.
 ## Validation gates
 
 1. Top level is a mapping and `flows` is a non-empty list.
-2. Each flow is an object with a unique, non-empty string `id` and `name`.
+2. Each flow is an object with an `id` matching `[A-Za-z0-9][A-Za-z0-9_-]*`, a non-empty string `name`, and no duplicate ID.
 3. Each flow has a non-empty `actions` list.
-4. Every action is an object with non-empty string `id`, `step`, `how`, and
-   `expected`; action IDs are unique within their flow.
+4. Every action is an object whose `id` matches the same format and contains no
+   `.`, with non-empty string `step`, `how`, and `expected`; action IDs are unique
+   within their flow.
 5. Flow and action IDs remain stable. Manifest
    `quality.required_outcomes.source_ref` uses
    `acceptance#<flow.id>.<action.id>`.

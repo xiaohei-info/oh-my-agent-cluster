@@ -522,6 +522,7 @@ class TestDispatchLoopIntegration:
                 "coverage": 95,
                 "env_setup": ["Mock env: login-gate"],
                 "quality": {
+                    "delivered_revision": "head-sha",
                     "outcome_mapping": [{
                         "outcome": "login", "implementation": ["src/login.py"],
                         "tests": ["tests/test_login.py"],

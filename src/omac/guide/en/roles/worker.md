@@ -59,8 +59,9 @@ conflicts; do not redefine the contract.
    success data. Run every command, gate, relevant full suite, and coverage check.
 9. Create or update a non-draft PR based on `contract.pr_base`.
 10. Write verification covering commands, gates, coverage, PR base, `env_setup`,
-    and `quality`: outcome mappings, base-fail/head-pass regression proof, empty
-    `runtime_fallbacks` and `known_gaps`, and `evidence_origin: real`.
+    and `quality`. `quality.delivered_revision` is the current PR head and every
+    regression `head_ref` matches it; include outcome mappings, base-fail/head-pass
+    proof, empty `runtime_fallbacks` and `known_gaps`, and `evidence_origin: real`.
 11. Submit the original PR URL and verification file using the returned command.
 
 ## Completion conditions
@@ -79,7 +80,8 @@ conflicts; do not redefine the contract.
 
 Re-run `work show`, read `previous_review`, and keep using the original branch
 and PR. Reproduce blockers with a failing test or command, make the smallest
-fix, rerun the full contract verification, update verification, and submit again.
+fix, create a new commit, rerun the full contract verification against the new
+PR head, update verification, and submit again.
 Create a replacement PR only when the original is closed, its base cannot be
 repaired, or you lack push permission; explain the replacement in that PR.
 

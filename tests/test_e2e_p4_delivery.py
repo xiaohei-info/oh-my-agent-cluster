@@ -107,6 +107,51 @@ def _dag_run_json(cwd: Path, env: Path, manifest: Path):
     return _run(["dag", "run", str(manifest), "--output", "json"], cwd=cwd, env=env)
 
 
+def _increment_node(node_id: str, worker: str, blocked_by: list[str]) -> dict:
+    command = f"pytest tests/int/{node_id} -q"
+    return {
+        "id": node_id,
+        "worker": worker,
+        "reviewer": "charlie",
+        "blocked_by": blocked_by,
+        "contract": {
+            "objective": f"Repair {node_id}",
+            "source_of_truth": [f"docs/{node_id}.md"],
+            "acceptance": ["flow-final"],
+            "non_goals": ["no scope creep"],
+            "verification_commands": [f"pytest tests/{node_id} -q"],
+            "integration_gates": [{
+                "name": f"{node_id}-gate",
+                "layer": "L1",
+                "delivery_goal": f"{node_id} delivered",
+                "source_of_truth": [f"docs/{node_id}.md"],
+                "covers": [node_id],
+                "acceptance_refs": ["flow-final"],
+                "commands": [command],
+                "required_metrics": {},
+                "artifacts": [],
+            }],
+            "quality": {
+                "required_outcomes": [{
+                    "id": f"{node_id}-outcome",
+                    "source_ref": "acceptance#flow-final.run",
+                }],
+                "business_tests": [{
+                    "id": f"{node_id}-business",
+                    "outcome_refs": [f"{node_id}-outcome"],
+                    "command": command,
+                    "level": "integration",
+                    "real_dependencies": ["none"],
+                    "must_fail_on_base": True,
+                }],
+                "runtime_data_policy": "real-or-error",
+            },
+            "pr_base": "feature/p4-smoke",
+            "coverage_gate": 90,
+        },
+    }
+
+
 # plan 流水线产出(manifest + 验收文档),直接落盘到 .omac/ —— 等价于
 # plan create(...)→ planner/orchestrator/reviewer 产出。
 FULL_MANIFEST = """\
@@ -369,7 +414,7 @@ class TestAcceptanceOuterLoop:
             "decompose-r1": {
                 "meta": {},
                 "nodes": [
-                    {"id": "fix-final", "worker": "bob", "blocked_by": ["middle"]},
+                    _increment_node("fix-final", "bob", ["middle"]),
                 ],
             }
         }

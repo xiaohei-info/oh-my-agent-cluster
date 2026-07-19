@@ -30,7 +30,7 @@ from ..errors import AuthError, PlatformError, ValidationError
 from ..i18n import ui
 from .models import (
     AgentInfo, AgentProvisionSpec, EngineConfig, ProjectInfo, RuntimeTarget,
-    SkillPackage, WorkItem, WorkItemStatus, WorkspaceInfo,
+    PullRequestSnapshot, SkillPackage, WorkItem, WorkItemStatus, WorkspaceInfo,
 )
 from .metadata_policy import assert_metadata_write_allowed, parse_payload_text
 from .runtime import AgentRuntime
@@ -71,6 +71,49 @@ class MulticaStore(WorkItemStore):
             return False
         self._pending_assignment_wakes.remove(item_id)
         return True
+
+    def inspect_pull_request(self, pr_url: str) -> PullRequestSnapshot:
+        try:
+            proc = subprocess.run(
+                ["gh", "pr", "view", pr_url, "--json", "isDraft,state,headRefOid"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except FileNotFoundError:
+            raise ValidationError(ui(
+                "GitHub PR checks require gh CLI. Install it, sign in, and retry: "
+                "brew install gh && gh auth login",
+                "GitHub PR 检查需要 gh CLI。请安装并登录后重试: "
+                "brew install gh && gh auth login"))
+        except subprocess.TimeoutExpired:
+            raise ValidationError(ui(
+                f"GitHub PR check timed out: {pr_url}. Verify network and GitHub access.",
+                f"GitHub PR 检查超时: {pr_url}。请确认网络/GitHub 可达后重试。"))
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()
+            raise ValidationError(ui(
+                f"GitHub PR check failed: {pr_url}\n{detail}",
+                f"GitHub PR 检查失败: {pr_url}\n{detail}"))
+        try:
+            payload = json.loads(proc.stdout or "{}")
+        except json.JSONDecodeError:
+            raise ValidationError(ui(
+                f"GitHub PR check returned non-JSON output: {pr_url}\n"
+                f"{(proc.stdout or '').strip()}",
+                f"GitHub PR 检查返回非 JSON: {pr_url}\n"
+                f"{(proc.stdout or '').strip()}"))
+        head_revision = payload.get("headRefOid")
+        if not isinstance(head_revision, str) or not head_revision.strip():
+            raise ValidationError(ui(
+                f"GitHub PR check did not return headRefOid: {pr_url}",
+                f"GitHub PR 检查未返回 headRefOid: {pr_url}"))
+        return PullRequestSnapshot(
+            url=pr_url,
+            is_draft=payload.get("isDraft") is True,
+            state=str(payload.get("state") or ""),
+            head_revision=head_revision,
+        )
 
     # ==================== 内部工具 ====================
 

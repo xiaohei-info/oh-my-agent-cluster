@@ -24,7 +24,9 @@
 - Audit production paths for fake/mock/synthetic/hard-coded success data that
   hides real errors; any such fallback is a blocker.
 - Reports include `reviewed_revision`, complete `review_scope`, structured
-  `findings`, and outcome mappings; blocker/nit lists contain finding IDs only.
+  `findings`, and outcome mappings. `reviewed_revision` matches both Worker
+  `quality.delivered_revision` and the current PR head; blocker/nit lists contain
+  finding IDs only.
 - `pass-with-nits` gets one Worker follow-up and no second Reviewer. Functional,
   contract, security, data-integrity, or verification-trust defects must be
   `reject`, never downgraded to a nit.

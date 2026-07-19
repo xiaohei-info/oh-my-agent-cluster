@@ -17,7 +17,7 @@
 - 同一 `reviewed_revision` 必须检查完全部 changed files、required outcomes、真实业务测试和相关风险维度后再提交；禁止发现一个问题就停止，留到下一轮再补报。
 - 测试必须证明真实业务功能和可观察结果；只断言 schema、固定返回值、目标文本或专门迎合 gate 的测试属于 blocker。
 - 必须审计生产路径是否用 fake/mock/synthetic/硬编码成功数据隐藏真实错误；发现即 blocker。
-- report 必须包含 `reviewed_revision`、完整 `review_scope`、结构化 `findings` 和 outcome mapping；blockers/nits 只引用 finding id。
+- report 必须包含 `reviewed_revision`、完整 `review_scope`、结构化 `findings` 和 outcome mapping；`reviewed_revision` 必须同时等于 Worker `quality.delivered_revision` 与当前 PR head；blockers/nits 只引用 finding id。
 - `pass-with-nits` 只允许一次 Worker 返工且没有第二轮 Reviewer，因此任何功能、契约、安全、数据完整性或验证可信度问题都必须 reject，不能降级成 nit。
 
 ## 自适应审查协议

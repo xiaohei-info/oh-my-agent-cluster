@@ -3,6 +3,14 @@ import os
 from .manifest import Manifest
 from ..i18n import ui
 
+
+def _non_empty_string_list(value) -> bool:
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(isinstance(entry, str) and entry.strip() for entry in value)
+    )
+
 def _has_cycle(nodes):
     WHITE, GREY, BLACK = 0, 1, 2
     color = {k: WHITE for k in nodes}
@@ -31,8 +39,8 @@ def _integration_gate_errors(prefix: str, gate, index: int) -> list:
 
     for field in ("source_of_truth", "covers", "acceptance_refs", "commands"):
         value = gate.get(field)
-        if not isinstance(value, list) or not value:
-            errs.append(f"{gate_prefix}.{field} must be non-empty")
+        if not _non_empty_string_list(value):
+            errs.append(f"{gate_prefix}.{field} must be non-empty strings")
 
     metrics = gate.get("required_metrics", {})
     if metrics is not None and not isinstance(metrics, dict):
@@ -48,21 +56,18 @@ def _integration_gate_errors(prefix: str, gate, index: int) -> list:
 def _contract_errors(node) -> list:
     contract = getattr(node, "contract", None)
     if contract is None:
-        return []
+        return [f"node {node.id}: contract is required"]
 
     errs = []
     prefix = f"node {node.id}: contract"
     if not contract.objective:
         errs.append(f"{prefix}.objective is required")
-    if not contract.acceptance:
-        errs.append(f"{prefix}.acceptance must be non-empty")
-    if not contract.source_of_truth:
-        errs.append(f"{prefix}.source_of_truth must be non-empty")
-    if not contract.non_goals:
-        errs.append(f"{prefix}.non_goals must be non-empty")
-    if not contract.verification_commands:
-        errs.append(f"{prefix}.verification_commands must be non-empty")
-    if not contract.integration_gates:
+    for field in (
+        "acceptance", "source_of_truth", "non_goals", "verification_commands",
+    ):
+        if not _non_empty_string_list(getattr(contract, field, None)):
+            errs.append(f"{prefix}.{field} must be non-empty strings")
+    if not isinstance(contract.integration_gates, list) or not contract.integration_gates:
         errs.append(f"{prefix}.integration_gates must be non-empty")
     else:
         for index, gate in enumerate(contract.integration_gates):
@@ -75,7 +80,13 @@ def _contract_errors(node) -> list:
     if not isinstance(coverage_gate, (int, float)) or isinstance(coverage_gate, bool) or not 0 <= coverage_gate <= 100:
         errs.append(f"{prefix}.coverage_gate must be a 0-100 number")
 
-    for required_path in contract.required_contracts:
+    required_contracts = contract.required_contracts
+    if not isinstance(required_contracts, list) or not all(
+        isinstance(path, str) and path.strip() for path in required_contracts
+    ):
+        errs.append(f"{prefix}.required_contracts must be strings")
+        required_contracts = []
+    for required_path in required_contracts:
         if not os.path.exists(required_path):
             errs.append(f"{prefix}.required_contracts path does not exist: {required_path}")
     return errs
@@ -117,10 +128,18 @@ def _quality_errors(prefix: str, contract) -> list:
         elif not source_ref.startswith("acceptance#") or "." not in source_ref.removeprefix("acceptance#"):
             errs.append(f"{item_prefix}.source_ref must use acceptance#flow.action")
 
-    declared_commands = set(contract.verification_commands)
+    declared_commands = {
+        command for command in contract.verification_commands
+        if isinstance(command, str) and command.strip()
+    } if isinstance(contract.verification_commands, list) else set()
     for gate in contract.integration_gates:
         if isinstance(gate, dict):
-            declared_commands.update(gate.get("commands", []))
+            commands = gate.get("commands")
+            if isinstance(commands, list):
+                declared_commands.update(
+                    command for command in commands
+                    if isinstance(command, str) and command.strip()
+                )
 
     covered_outcomes = set()
     test_ids = set()
@@ -137,8 +156,8 @@ def _quality_errors(prefix: str, contract) -> list:
         else:
             test_ids.add(test_id)
         refs = business_test.get("outcome_refs")
-        if not isinstance(refs, list) or not refs:
-            errs.append(f"{item_prefix}.outcome_refs must be non-empty")
+        if not _non_empty_string_list(refs):
+            errs.append(f"{item_prefix}.outcome_refs must be non-empty strings")
         else:
             for outcome_ref in refs:
                 if outcome_ref not in outcome_ids:
@@ -153,8 +172,8 @@ def _quality_errors(prefix: str, contract) -> list:
         if business_test.get("level") not in {"integration", "e2e"}:
             errs.append(f"{item_prefix}.level must be integration|e2e")
         dependencies = business_test.get("real_dependencies")
-        if not isinstance(dependencies, list) or not dependencies:
-            errs.append(f"{item_prefix}.real_dependencies must be non-empty")
+        if not _non_empty_string_list(dependencies):
+            errs.append(f"{item_prefix}.real_dependencies must be non-empty strings")
         if not isinstance(business_test.get("must_fail_on_base"), bool):
             errs.append(f"{item_prefix}.must_fail_on_base must be boolean")
 
@@ -180,11 +199,12 @@ def lint(m: Manifest, pool: set, *, acceptance=None) -> list:
         for b in n.blocked_by:
             if b not in m.nodes:
                 errs.append(f"node {n.id}: blocked_by references unknown node '{b}'")
-        if n.reviewer is not None:
-            if n.reviewer == n.worker:
-                errs.append(f"node {n.id}: reviewer must differ from worker")
-            if n.reviewer not in pool:
-                errs.append(f"node {n.id}: reviewer '{n.reviewer}' not in agent pool")
+        if n.reviewer is None:
+            errs.append(f"node {n.id}: reviewer is required")
+        elif n.reviewer == n.worker:
+            errs.append(f"node {n.id}: reviewer must differ from worker")
+        elif n.reviewer not in pool:
+            errs.append(f"node {n.id}: reviewer '{n.reviewer}' not in agent pool")
         errs.extend(_contract_errors(n))
     if acceptance is not None:
         flow_ids = set(getattr(acceptance, "flow_ids", None) or [])
@@ -249,11 +269,12 @@ def lint_increment(increment: Manifest, existing: Manifest, pool: set) -> list:
         for b in n.blocked_by:
             if b not in combined_keys:
                 errs.append(f"node {n.id}: blocked_by references unknown node {b!r}")
-        if n.reviewer is not None:
-            if n.reviewer == n.worker:
-                errs.append(f"node {n.id}: reviewer must differ from worker")
-            if n.reviewer not in pool:
-                errs.append(f"node {n.id}: reviewer {n.reviewer!r} not in agent pool")
+        if n.reviewer is None:
+            errs.append(f"node {n.id}: reviewer is required")
+        elif n.reviewer == n.worker:
+            errs.append(f"node {n.id}: reviewer must differ from worker")
+        elif n.reviewer not in pool:
+            errs.append(f"node {n.id}: reviewer {n.reviewer!r} not in agent pool")
         errs.extend(_contract_errors(n))
 
     combined_nodes = dict(existing.nodes)

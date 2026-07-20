@@ -18,6 +18,13 @@ REVIEW_VERDICTS = REVIEW_APPROVE | {"reject"}
 ACCEPTANCE_STATUS = {"pass", "fail"}
 
 
+def _command_succeeded(command) -> bool:
+    if not isinstance(command, dict):
+        return False
+    exit_code = command.get("exit_code")
+    return type(exit_code) is int and exit_code == 0
+
+
 def _commands_by_text(commands):
     if not isinstance(commands, list) or not commands:
         return None
@@ -35,7 +42,7 @@ def _validate_expected_commands(command_by_text, expected_commands, *, missing_p
         if actual is None:
             errors.append(f"{missing_prefix}: {expected_cmd}")
             continue
-        if actual.get("exit_code") != 0:
+        if not _command_succeeded(actual):
             errors.append(f"{failed_prefix}: {expected_cmd}")
     return errors
 
@@ -62,7 +69,7 @@ def _collect_business_test_coverage(commands, expected_acceptance, *, prefix):
             command_text = "<unknown>"
 
         exit_code = command.get("exit_code")
-        command_succeeded = type(exit_code) is int and exit_code == 0
+        command_succeeded = _command_succeeded(command)
         if type(exit_code) is not int:
             errors.append(
                 f"{prefix} business test command exit_code must be integer 0: "

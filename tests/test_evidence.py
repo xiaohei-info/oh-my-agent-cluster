@@ -110,6 +110,46 @@ def test_worker_evidence_missing_command():
     assert any("missing command" in e for e in errs)
 
 
+@pytest.mark.parametrize("invalid_exit_code", [False, 0.0, None])
+def test_worker_evidence_rejects_non_integer_zero_for_required_command(
+        invalid_exit_code):
+    v = _good_verification()
+    business_tests = v["commands"][0].pop("business_tests")
+    v["commands"].append({
+        "cmd": "pytest tests/business",
+        "exit_code": 0,
+        "business_tests": business_tests,
+    })
+    if invalid_exit_code is None:
+        del v["commands"][0]["exit_code"]
+    else:
+        v["commands"][0]["exit_code"] = invalid_exit_code
+
+    errs = validate_worker_evidence(
+        NODE, Item(artifacts={"pr_url": "u"}, verification=v))
+
+    assert "verification command failed: pytest -q" in errs
+
+
+@pytest.mark.parametrize("invalid_exit_code", [False, 0.0, None])
+def test_worker_evidence_rejects_non_integer_zero_for_integration_command(
+        invalid_exit_code):
+    v = _good_verification()
+    command = v["integration_gates"][0]["commands"][0]
+    if invalid_exit_code is None:
+        del command["exit_code"]
+    else:
+        command["exit_code"] = invalid_exit_code
+
+    errs = validate_worker_evidence(
+        NODE, Item(artifacts={"pr_url": "u"}, verification=v))
+
+    assert (
+        "verification integration command failed for gate-1: pytest tests/int"
+        in errs
+    )
+
+
 def test_worker_evidence_env_setup_required_when_integration_gates():
     v = _good_verification()
     del v["env_setup"]

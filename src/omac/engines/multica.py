@@ -74,7 +74,6 @@ _GH_AUTH_MARKERS = (
 _GH_CI_FAILURE_SUMMARIES = (
     "some checks were not successful",
     "checks failed",
-    "check failed",
 )
 
 _GH_CI_FAILURE_STATES = {

@@ -62,6 +62,10 @@ evidence agree with the node identity.
 separate check command cannot admit a partial contract. The engine resolved
 from CLI/environment/config precedence is overlaid onto the invocation config,
 so adapters and delivery commands cannot disagree about the active engine.
+Generated manifest text is parsed with the same project root as its eventual
+manifest file, so relative `required_contracts` behave identically before and
+after persistence. YAML and schema failures are returned as machine-gate
+findings instead of escaping the decomposition revision loop.
 
 ### 2.1 Acceptance action identifiers
 
@@ -314,6 +318,13 @@ execution and platform error classification. Auth, network, CLI-availability,
 and timeout failures do not consume Worker retry budget; only an actual CI or
 merge failure may return to the Worker. A retry limit of `1` permits one Worker
 rework and blocks on the next failure.
+
+GitHub command failures are fail-closed: only explicit failed-check output,
+merge conflicts, or head-revision mismatches are Worker-correctable. Unknown
+GraphQL, platform, wrapper, or command-availability failures remain auth or
+platform errors. CI/merge assignment and wake form one compensated handoff;
+failure rolls back the bounce count and records a structured blocked reason so
+the caller reports the real remediation instead of generic retry exhaustion.
 
 ## 6. Mock and Synthetic Data Boundary
 

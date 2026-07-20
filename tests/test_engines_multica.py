@@ -947,6 +947,12 @@ def test_multica_ci_network_failure_is_platform_error(monkeypatch):
             "GraphQL: Something went wrong while executing your query",
             PlatformError,
         ),
+        (
+            "gh pr checks {pr_url} --watch --fail-fast",
+            1,
+            "GraphQL: check failed while querying repository metadata",
+            PlatformError,
+        ),
     ],
 )
 def test_multica_ci_failures_fail_closed(

@@ -20,6 +20,8 @@ import pytest
 from omac.core.manifest import Manifest, Node
 from omac.core.config import DEFAULT_RETRY
 from omac.engines.models import (
+    DeliveryAction,
+    DeliveryBlockReason,
     DeliveryCommandOutcome,
     DeliveryCommandResult,
     EngineConfig,
@@ -33,7 +35,7 @@ from omac.pipeline.delivery import (
     to_platform_status,
 )
 from omac.pipeline import loop
-from omac.errors import PlatformError
+from omac.errors import AuthError, PlatformError
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────
@@ -107,6 +109,91 @@ class TestStatusMapping:
 # ── advance_delivery 单元测试(对齐 canonical WorkItem.bounces.ci) ──────────
 
 class TestAdvanceDeliveryUnit:
+    @pytest.mark.parametrize("error", [
+        AuthError("assignment auth failed"),
+        PlatformError("assignment platform failed"),
+    ])
+    def test_ci_assignment_failure_rolls_back_retry_and_blocks(
+        self, tmp_path, monkeypatch, error,
+    ):
+        store = _store()
+        item = _worker_done_item(store)
+        manifest = Manifest(meta={}, nodes={"a": _node()})
+        manifest.nodes["a"].work_item_id = item.id
+        monkeypatch.setattr(
+            store,
+            "run_ci_check",
+            lambda *args, **kwargs: DeliveryCommandResult(
+                outcome=DeliveryCommandOutcome.FAILED,
+                exit_code=1,
+                output="tests failed",
+                summary="tests failed",
+            ),
+        )
+        monkeypatch.setattr(
+            store,
+            "assign_work_item",
+            lambda *args, **kwargs: (_ for _ in ()).throw(error),
+        )
+
+        result = advance_delivery(
+            _ci_config(_ci_script(tmp_path, "exit 1")),
+            manifest,
+            "a",
+            store,
+            _runtime(store),
+            dict(DEFAULT_RETRY),
+        )
+
+        assert result.action is DeliveryAction.BLOCKED
+        assert result.blocked_reason is DeliveryBlockReason.ASSIGNMENT_FAILED
+        assert str(error) in result.detail
+        assert store.get_work_item(item.id).bounces.ci == 0
+        assert store.get_work_item(item.id).status is WorkItemStatus.BLOCKED
+        assert manifest.nodes["a"].status == "blocked"
+
+    @pytest.mark.parametrize("error", [
+        AuthError("wake auth failed"),
+        PlatformError("wake platform failed"),
+    ])
+    def test_ci_wake_failure_rolls_back_retry_and_blocks(
+        self, tmp_path, monkeypatch, error,
+    ):
+        store = _store()
+        item = _worker_done_item(store)
+        manifest = Manifest(meta={}, nodes={"a": _node()})
+        manifest.nodes["a"].work_item_id = item.id
+        monkeypatch.setattr(
+            store,
+            "run_ci_check",
+            lambda *args, **kwargs: DeliveryCommandResult(
+                outcome=DeliveryCommandOutcome.FAILED,
+                exit_code=1,
+                output="tests failed",
+                summary="tests failed",
+            ),
+        )
+
+        class FailingRuntime:
+            def wake(self, item_id, agent, role):
+                raise error
+
+        result = advance_delivery(
+            _ci_config(_ci_script(tmp_path, "exit 1")),
+            manifest,
+            "a",
+            store,
+            FailingRuntime(),
+            dict(DEFAULT_RETRY),
+        )
+
+        assert result.action is DeliveryAction.BLOCKED
+        assert result.blocked_reason is DeliveryBlockReason.WAKE_FAILED
+        assert str(error) in result.detail
+        assert store.get_work_item(item.id).bounces.ci == 0
+        assert store.get_work_item(item.id).status is WorkItemStatus.BLOCKED
+        assert manifest.nodes["a"].status == "blocked"
+
     def test_skip_ci_when_unconfigured(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         store = _store()
@@ -115,7 +202,8 @@ class TestAdvanceDeliveryUnit:
         manifest.nodes["a"].work_item_id = item.id
         manifest.nodes["a"].status = "in_progress"
         rt = _runtime(store)
-        assert advance_delivery({}, manifest, "a", store, rt, dict(DEFAULT_RETRY)) == "pass"
+        result = advance_delivery({}, manifest, "a", store, rt, dict(DEFAULT_RETRY))
+        assert result.action is DeliveryAction.PASS
         # 无任何评论 / 状态不变
         assert store.get_comments(item.id) == []
         assert manifest.nodes["a"].status == "in_progress"
@@ -127,9 +215,10 @@ class TestAdvanceDeliveryUnit:
         manifest = Manifest(meta={}, nodes={"a": _node()})
         manifest.nodes["a"].work_item_id = item.id
         # ci 块存在但缺 check_command,且无 .github/workflows → 跳过
-        assert advance_delivery(
+        result = advance_delivery(
             {"ci": {"timeout_minutes": 30}}, manifest, "a", store, _runtime(store),
-            dict(DEFAULT_RETRY)) == "pass"
+            dict(DEFAULT_RETRY))
+        assert result.action is DeliveryAction.PASS
 
     def test_ci_passes_returns_pass(self, tmp_path):
         store = _store()
@@ -139,7 +228,8 @@ class TestAdvanceDeliveryUnit:
         script = _ci_script(tmp_path, 'echo green; exit 0')
         cfg = _ci_config(script)
         limits = dict(DEFAULT_RETRY)
-        assert advance_delivery(cfg, manifest, "a", store, _runtime(store), limits) == "pass"
+        result = advance_delivery(cfg, manifest, "a", store, _runtime(store), limits)
+        assert result.action is DeliveryAction.PASS
         assert manifest.nodes["a"].status == "in_progress"  # 回到 in_progress,由 loop 转 in_review
         assert store.get_work_item(item.id).bounces.ci == 0
 
@@ -151,7 +241,8 @@ class TestAdvanceDeliveryUnit:
         script = _ci_script(tmp_path, 'echo boom; exit 1')
         cfg = _ci_config(script)
         limits = dict(DEFAULT_RETRY)
-        assert advance_delivery(cfg, manifest, "a", store, _runtime(store), limits) == "bounce"
+        result = advance_delivery(cfg, manifest, "a", store, _runtime(store), limits)
+        assert result.action is DeliveryAction.BOUNCE
         assert manifest.nodes["a"].status == "in_progress"
         assert store.get_work_item(item.id).bounces.ci == 1
         comments = store.get_comments(item.id)
@@ -196,7 +287,8 @@ class TestAdvanceDeliveryUnit:
             store.update_work_item_metadata(item.id, artifacts={"pr_url": "https://example.com/pr/1"})
             store.update_status(item.id, WorkItemStatus.DONE)
             res = advance_delivery(cfg, manifest, "a", store, _runtime(store), limits)
-        assert res == "blocked"
+        assert res.action is DeliveryAction.BLOCKED
+        assert res.blocked_reason is DeliveryBlockReason.RETRY_EXHAUSTED
         assert manifest.nodes["a"].status == "blocked"
         assert store.get_work_item(item.id).bounces.ci == DEFAULT_RETRY["ci"]
         assert store.get_work_item(item.id).status is WorkItemStatus.BLOCKED
@@ -207,9 +299,11 @@ class TestAdvanceDeliveryUnit:
         manifest = Manifest(meta={}, nodes={"a": _node()})
         manifest.nodes["a"].work_item_id = item.id
         script = _ci_script(tmp_path, "exit 1")
-        assert advance_delivery(
+        result = advance_delivery(
             _ci_config(script), manifest, "a", store, _runtime(store),
-            {"ci": 0, "review": 3, "merge": 3}) == "blocked"
+            {"ci": 0, "review": 3, "merge": 3})
+        assert result.action is DeliveryAction.BLOCKED
+        assert result.blocked_reason is DeliveryBlockReason.RETRY_EXHAUSTED
 
     def test_custom_retry_ci_limit(self, tmp_path):
         store = _store()
@@ -224,9 +318,10 @@ class TestAdvanceDeliveryUnit:
             store.update_status(item.id, WorkItemStatus.DONE)
             res = advance_delivery(_ci_config(script), manifest, "a", store, _runtime(store), limits)
             if i < 5:
-                assert res == "bounce"
+                assert res.action is DeliveryAction.BOUNCE
             else:
-                assert res == "blocked"
+                assert res.action is DeliveryAction.BLOCKED
+                assert res.blocked_reason is DeliveryBlockReason.RETRY_EXHAUSTED
         assert store.get_work_item(item.id).bounces.ci == 5
 
     def test_ci_configured_without_pr_url_blocks_with_teaching(self, tmp_path):
@@ -238,7 +333,8 @@ class TestAdvanceDeliveryUnit:
         script = _ci_script(tmp_path, "exit 0")
         res = advance_delivery(
             _ci_config(script), manifest, "a", store, _runtime(store), dict(DEFAULT_RETRY))
-        assert res == "blocked"
+        assert res.action is DeliveryAction.BLOCKED
+        assert res.blocked_reason is DeliveryBlockReason.MISSING_PR
         comments = store.get_comments(item.id)
         assert any("pr_url" in c for c in comments)
         assert any("omac work submit" in c for c in comments)

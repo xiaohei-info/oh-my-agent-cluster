@@ -36,7 +36,13 @@ import time
 
 from ..core.config import DEFAULT_RETRY, get_ci_config, get_merge_config
 from ..core.evidence import delivered_revision_of
-from ..engines.models import DeliveryCommandOutcome, WorkItemStatus
+from ..engines.models import (
+    DeliveryAction,
+    DeliveryBlockReason,
+    DeliveryCommandOutcome,
+    DeliveryResult,
+    WorkItemStatus,
+)
 from ..engines.runtime import AgentRuntime
 from ..core.manifest import Manifest
 from ..errors import AuthError, PlatformError
@@ -79,27 +85,27 @@ def advance_delivery(
     runtime: AgentRuntime,
     retry_limits: dict,
     project_root: str = ".",
-) -> str:
+) -> DeliveryResult:
     """worker 证据已过门后推进 CI 门(§7.3)。
 
-    - 未配置 ci 且未检测到 GitHub workflow → 环节整体跳过,返回 ``'pass'``。
+    - 未配置 ci 且未检测到 GitHub workflow → 环节整体跳过，返回 PASS。
     - 配置了 ci 或检测到 GitHub workflow → 进入 ``ci_check``(manifest 细分态,平台仍 in_progress),执行
       ``ci.check_command``:
-        * 绿 → 回到 ``in_progress``,返回 ``'pass'``
+        * 绿 → 回到 ``in_progress``，返回 PASS
         * 失败/超时 → 失败摘要(命令输出尾部) add_comment + 转回 worker +
           wake + ``ci_bounce``+1;
-          - 已完成返工次数达到 ``retry_limits['ci']`` → blocked,返回 ``'blocked'``
-          - 否则返回 ``'bounce'``(节点已置回 in_progress,loop 本 tick 不动它)。
+          - 已完成返工次数达到 ``retry_limits['ci']`` → BLOCKED(RETRY_EXHAUSTED)
+          - 否则返回 BOUNCE(节点已置回 in_progress，loop 本 tick 不动它)。
 
     回退计数(读/写)经平台 ``WorkItem.bounces.ci``(单一事实源,Store 只存取);
     manifest Node 不持计数。
-    返回:'pass'(继续) | 'bounce'(已转回 worker,上界未到) | 'blocked'(上界耗尽)。
+    BLOCKED 结果携带稳定原因，供 caller 报告真实修复动作。
     """
     node = manifest.nodes[node_key]
     item_id = node.work_item_id
     ci = get_ci_config(config, root=project_root)
     if ci is None:
-        return "pass"
+        return DeliveryResult(DeliveryAction.PASS)
 
     item = store.get_work_item(item_id)
     pr_url = ""
@@ -116,7 +122,8 @@ def advance_delivery(
             "补交 PR 地址后重新提交。"))
         node.status = "blocked"
         store.update_status(item_id, WorkItemStatus.BLOCKED)
-        return "blocked"
+        return DeliveryResult(
+            DeliveryAction.BLOCKED, DeliveryBlockReason.MISSING_PR)
 
     # 进入 ci_check(manifest 细分态;平台仍 in_progress)
     node.status = "ci_check"
@@ -136,7 +143,7 @@ def advance_delivery(
     if result.passed:
         node.status = "in_progress"
         store.update_status(item_id, to_platform_status("in_progress"))
-        return "pass"
+        return DeliveryResult(DeliveryAction.PASS)
     if result.outcome is not DeliveryCommandOutcome.FAILED:
         node.status = "in_progress"
         raise PlatformError(ui(
@@ -156,7 +163,8 @@ def advance_delivery(
             f"--- 命令输出尾部 ---\n{result.summary}"))
         node.status = "blocked"
         store.update_status(item_id, WorkItemStatus.BLOCKED)
-        return "blocked"
+        return DeliveryResult(
+            DeliveryAction.BLOCKED, DeliveryBlockReason.RETRY_EXHAUSTED)
 
     next_bounce = cur_bounce + 1
     store.add_comment(item_id, ui(
@@ -167,18 +175,17 @@ def advance_delivery(
     store.update_work_item_metadata(item_id, ci_bounce=next_bounce)
     node.status = "in_progress"
     store.update_status(item_id, to_platform_status("in_progress"))
-    store.assign_work_item(item_id, node.worker, "worker")
-    try:
-        runtime.wake(item_id, node.worker, "worker")
-    except (AuthError, PlatformError) as exc:
-        store.update_work_item_metadata(item_id, ci_bounce=cur_bounce)
-        node.status = "blocked"
-        store.update_status(item_id, WorkItemStatus.BLOCKED)
-        store.add_comment(item_id, ui(
-            f"Failed to wake worker {node.worker} after CI failure; retry count rolled back: {exc}",
-            f"CI 失败后唤醒 worker {node.worker} 失败，已回滚返工计数: {exc}"))
-        return "blocked"
-    return "bounce"
+    handoff_failure = _handoff_worker(
+        node,
+        store,
+        runtime,
+        bounce_field="ci_bounce",
+        previous_bounce=cur_bounce,
+        stage="CI",
+    )
+    if handoff_failure is not None:
+        return handoff_failure
+    return DeliveryResult(DeliveryAction.BOUNCE)
 
 
 # ── P4.2 自动 merge 与冲突回退 ──────────────────────────────────────────────
@@ -190,19 +197,19 @@ def run_merge_delivery(
     store: object,
     runtime: AgentRuntime,
     retry_limits: dict,
-) -> str:
+) -> DeliveryResult:
     """reviewer pass 后、进 done 之前的自动 merge 门(§7.3)。
 
     - 未配置 merge → 默认执行带 ``--match-head-commit {delivered_revision}`` 的 GitHub merge。
-    - 配置了 merge 但节点无 pr_url → 防御性 blocked + 报错即教学,返回 ``'blocked'``。
+    - 配置了 merge 但节点无 pr_url → 防御性 BLOCKED(MISSING_PR) + 报错即教学。
     - 配置了 merge → command 必须同时包含 ``{pr_url}`` 和
       ``{delivered_revision}``;进入 ``merging``(manifest 细分态,平台仍 in_review),执行:
         * 成功 → 回到 ``in_progress`` 语义即「已合入」;manifest ``Node`` 记录
-          ``merged: true`` / ``merged_at``;返回 ``'pass'``(loop 随即 ``done``)。
+          ``merged: true`` / ``merged_at``；返回 PASS(loop 随即 ``done``)。
         * 冲突/失败 → 失败摘要(命令输出尾部) add_comment + reset_review + 转回
           worker + wake + ``merge_bounce``+1;
-          - 已完成返工次数达到 ``retry_limits['merge']`` → blocked,返回 ``'blocked'``
-          - 否则返回 ``'bounce'``(节点已置回 in_progress,loop 本 tick 不动它)。
+          - 已完成返工次数达到 ``retry_limits['merge']`` → BLOCKED(RETRY_EXHAUSTED)
+          - 否则返回 BOUNCE(节点已置回 in_progress，loop 本 tick 不动它)。
 
     回退计数(读/写)经平台 ``WorkItem.bounces.merge``(单一事实源,Store 只存取);
     manifest Node 不持计数。上界由 ``config.retry.merge``(缺省 3)经
@@ -230,7 +237,8 @@ def run_merge_delivery(
             "请确认 worker 已用 `omac work submit <id> --pr-url <url> ...` 提交 PR 地址。"))
         node.status = "blocked"
         store.update_status(item_id, WorkItemStatus.BLOCKED)
-        return "blocked"
+        return DeliveryResult(
+            DeliveryAction.BLOCKED, DeliveryBlockReason.MISSING_PR)
 
     delivered_revision = delivered_revision_of(item.verification)
     if delivered_revision is None:
@@ -242,7 +250,8 @@ def run_merge_delivery(
         ))
         node.status = "blocked"
         store.update_status(item_id, WorkItemStatus.BLOCKED)
-        return "blocked"
+        return DeliveryResult(
+            DeliveryAction.BLOCKED, DeliveryBlockReason.MISSING_REVISION)
 
     # 进入 merging(manifest 细分态;平台仍 in_review)
     node.status = "merging"
@@ -269,7 +278,7 @@ def run_merge_delivery(
         node.merged = True
         node.merged_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         store.update_status(item_id, to_platform_status("in_progress"))
-        return "pass"
+        return DeliveryResult(DeliveryAction.PASS)
     if result.outcome is not DeliveryCommandOutcome.FAILED:
         node.status = "in_review"
         raise PlatformError(ui(
@@ -285,7 +294,7 @@ def run_merge_delivery(
 
 
 def _bounce_or_block_merge(node, item, store, runtime, retry_limits, *,
-                           label: str, summary: str) -> str:
+                           label: str, summary: str) -> DeliveryResult:
     """merge 失败后的有界「回到 worker」回退(CI 路径的对称实现)。
 
     复用与 CI 回退相同的单一事实源与封顶语义:
@@ -304,7 +313,8 @@ def _bounce_or_block_merge(node, item, store, runtime, retry_limits, *,
             f"--- 命令输出尾部 ---\n{summary}"))
         node.status = "blocked"
         store.update_status(item_id, WorkItemStatus.BLOCKED)
-        return "blocked"
+        return DeliveryResult(
+            DeliveryAction.BLOCKED, DeliveryBlockReason.RETRY_EXHAUSTED)
 
     next_bounce = cur_bounce + 1
     store.add_comment(item_id, ui(
@@ -316,15 +326,48 @@ def _bounce_or_block_merge(node, item, store, runtime, retry_limits, *,
     node.status = "in_progress"
     store.update_status(item_id, to_platform_status("in_progress"))
     store.reset_review(item_id)
-    store.assign_work_item(item_id, node.worker, "worker")
+    handoff_failure = _handoff_worker(
+        node,
+        store,
+        runtime,
+        bounce_field="merge_bounce",
+        previous_bounce=cur_bounce,
+        stage="merge",
+    )
+    if handoff_failure is not None:
+        return handoff_failure
+    return DeliveryResult(DeliveryAction.BOUNCE)
+
+
+def _handoff_worker(
+    node,
+    store,
+    runtime,
+    *,
+    bounce_field: str,
+    previous_bounce: int,
+    stage: str,
+) -> DeliveryResult | None:
+    """把 assignment + wake 作为一个可补偿的 worker handoff 边界。"""
+    reason = DeliveryBlockReason.ASSIGNMENT_FAILED
     try:
-        runtime.wake(item_id, node.worker, "worker")
+        store.assign_work_item(node.work_item_id, node.worker, "worker")
+        reason = DeliveryBlockReason.WAKE_FAILED
+        runtime.wake(node.work_item_id, node.worker, "worker")
+        return None
     except (AuthError, PlatformError) as exc:
-        store.update_work_item_metadata(item_id, merge_bounce=cur_bounce)
+        store.update_work_item_metadata(
+            node.work_item_id, **{bounce_field: previous_bounce})
         node.status = "blocked"
-        store.update_status(item_id, WorkItemStatus.BLOCKED)
-        store.add_comment(item_id, ui(
-            f"Failed to wake worker {node.worker} after merge failure; retry count rolled back: {exc}",
-            f"merge 失败后唤醒 worker {node.worker} 失败，已回滚返工计数: {exc}"))
-        return "blocked"
-    return "bounce"
+        store.update_status(node.work_item_id, WorkItemStatus.BLOCKED)
+        operation = "assign" if reason is DeliveryBlockReason.ASSIGNMENT_FAILED else "wake"
+        store.add_comment(node.work_item_id, ui(
+            f"Failed to {operation} worker {node.worker} during {stage} handoff; "
+            f"retry count rolled back: {exc}",
+            f"{stage} 回派期间无法{('分配' if operation == 'assign' else '唤醒')} "
+            f"worker {node.worker}，已回滚返工计数: {exc}"))
+        return DeliveryResult(
+            DeliveryAction.BLOCKED,
+            reason,
+            str(exc),
+        )

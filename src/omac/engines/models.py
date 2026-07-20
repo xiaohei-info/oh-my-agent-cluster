@@ -27,6 +27,39 @@ class DeliveryCommandOutcome(Enum):
     TIMED_OUT = "timed_out"
 
 
+class DeliveryAction(Enum):
+    """delivery 状态机单步动作。"""
+
+    PASS = "pass"
+    BOUNCE = "bounce"
+    BLOCKED = "blocked"
+
+
+class DeliveryBlockReason(Enum):
+    """delivery 无法继续时的稳定业务原因。"""
+
+    RETRY_EXHAUSTED = "retry_exhausted"
+    ASSIGNMENT_FAILED = "assignment_failed"
+    WAKE_FAILED = "wake_failed"
+    MISSING_PR = "missing_pr"
+    MISSING_REVISION = "missing_revision"
+
+
+@dataclass(frozen=True)
+class DeliveryResult:
+    """CI / merge 推进一步后的结构化业务结果。"""
+
+    action: DeliveryAction
+    blocked_reason: Optional[DeliveryBlockReason] = None
+    detail: str = ""
+
+    def __post_init__(self) -> None:
+        if self.action is DeliveryAction.BLOCKED and self.blocked_reason is None:
+            raise ValueError("blocked delivery result requires blocked_reason")
+        if self.action is not DeliveryAction.BLOCKED and self.blocked_reason is not None:
+            raise ValueError("non-blocked delivery result cannot carry blocked_reason")
+
+
 @dataclass(frozen=True)
 class DeliveryCommandResult:
     """adapter 执行 CI / merge 命令后的结构化结果。

@@ -35,6 +35,8 @@ from omac.core.config import (
 from omac.core.manifest import Manifest, Node
 from omac.engines.mock import MockRuntime, MockStore
 from omac.engines.models import (
+    DeliveryAction,
+    DeliveryBlockReason,
     DeliveryCommandOutcome,
     DeliveryCommandResult,
     EngineConfig,
@@ -168,8 +170,9 @@ class TestRunMergeDeliveryUnit:
 
         monkeypatch.setattr(store, "merge_pull_request", merge_pull_request)
 
-        assert run_merge_delivery({}, manifest, "a", store, _runtime(store),
-                                  dict(DEFAULT_RETRY)) == "pass"
+        result = run_merge_delivery(
+            {}, manifest, "a", store, _runtime(store), dict(DEFAULT_RETRY))
+        assert result.action is DeliveryAction.PASS
         assert seen == {
             "pr_url": "https://github.com/acme/project/pull/1",
             "delivered_revision": "delivered-sha",
@@ -197,10 +200,11 @@ class TestRunMergeDeliveryUnit:
         monkeypatch.setattr(store, "merge_pull_request", merge_pull_request)
         script = _merge_script(tmp_path, "exit 0")
 
-        assert run_merge_delivery(
+        result = run_merge_delivery(
             _merge_config(script), manifest, "a", store, _runtime(store),
             dict(DEFAULT_RETRY),
-        ) == "pass"
+        )
+        assert result.action is DeliveryAction.PASS
         assert "{delivered_revision}" in seen["command"]
         assert seen["delivered_revision"] == "delivered-sha"
 
@@ -225,9 +229,10 @@ class TestRunMergeDeliveryUnit:
 
         monkeypatch.setattr(store, "merge_pull_request", merge_pull_request)
 
-        assert run_merge_delivery(
+        result = run_merge_delivery(
             {}, manifest, "a", store, _runtime(store), dict(DEFAULT_RETRY),
-        ) == "pass"
+        )
+        assert result.action is DeliveryAction.PASS
         assert "--match-head-commit {delivered_revision}" in seen["command"]
         assert seen["delivered_revision"] == "followup-sha"
 
@@ -273,9 +278,10 @@ class TestRunMergeDeliveryUnit:
                 DeliveryCommandOutcome.PASSED, exit_code=0),
         )
 
-        assert run_merge_delivery(
+        result = run_merge_delivery(
             {"merge": {"timeout_minutes": 30}}, manifest, "a", store,
-            _runtime(store), dict(DEFAULT_RETRY)) == "pass"
+            _runtime(store), dict(DEFAULT_RETRY))
+        assert result.action is DeliveryAction.PASS
         assert manifest.nodes["a"].merged is True
 
     def test_merge_passes_returns_pass_and_records_merge_info(self, tmp_path):
@@ -287,7 +293,8 @@ class TestRunMergeDeliveryUnit:
         script = _merge_script(tmp_path, 'echo merged; exit 0')
         cfg = _merge_config(script)
         limits = dict(DEFAULT_RETRY)
-        assert run_merge_delivery(cfg, manifest, "a", store, _runtime(store), limits) == "pass"
+        result = run_merge_delivery(cfg, manifest, "a", store, _runtime(store), limits)
+        assert result.action is DeliveryAction.PASS
         assert manifest.nodes["a"].merged is True
         assert manifest.nodes["a"].merged_at is not None
         # 成功后节点语义回到 in_progress(即将 done),未落评论
@@ -302,7 +309,8 @@ class TestRunMergeDeliveryUnit:
         script = _merge_script(tmp_path, 'echo "CONFLICT in foo.py" >&2; exit 1')
         cfg = _merge_config(script)
         limits = dict(DEFAULT_RETRY)
-        assert run_merge_delivery(cfg, manifest, "a", store, _runtime(store), limits) == "bounce"
+        result = run_merge_delivery(cfg, manifest, "a", store, _runtime(store), limits)
+        assert result.action is DeliveryAction.BOUNCE
         assert manifest.nodes["a"].status == "in_progress"
         assert store.get_work_item(item.id).bounces.merge == 1
         comments = store.get_comments(item.id)
@@ -336,11 +344,12 @@ class TestRunMergeDeliveryUnit:
                         {"acceptance": "a works", "evidence": "ok", "status": "pass"}],
                     "blockers": []})
             result = run_merge_delivery(cfg, manifest, "a", store, _runtime(store), limits)
-            assert result == "bounce"
+            assert result.action is DeliveryAction.BOUNCE
         manifest.nodes["a"].status = "in_review"
         store.update_status(item.id, WorkItemStatus.DONE)
         result = run_merge_delivery(cfg, manifest, "a", store, _runtime(store), limits)
-        assert result == "blocked"
+        assert result.action is DeliveryAction.BLOCKED
+        assert result.blocked_reason is DeliveryBlockReason.RETRY_EXHAUSTED
         assert manifest.nodes["a"].status == "blocked"
         assert store.get_work_item(item.id).bounces.merge == DEFAULT_RETRY["merge"]
         assert store.get_work_item(item.id).status is WorkItemStatus.BLOCKED
@@ -352,9 +361,11 @@ class TestRunMergeDeliveryUnit:
         manifest.nodes["a"].work_item_id = item.id
         manifest.nodes["a"].status = "in_review"
         script = _merge_script(tmp_path, "exit 1")
-        assert run_merge_delivery(
+        result = run_merge_delivery(
             _merge_config(script), manifest, "a", store, _runtime(store),
-            resolve_retry({"retry": {"merge": 0}})) == "blocked"
+            resolve_retry({"retry": {"merge": 0}}))
+        assert result.action is DeliveryAction.BLOCKED
+        assert result.blocked_reason is DeliveryBlockReason.RETRY_EXHAUSTED
 
     def test_custom_retry_merge_limit(self, tmp_path):
         store = _store()
@@ -379,9 +390,10 @@ class TestRunMergeDeliveryUnit:
             res = run_merge_delivery(_merge_config(script), manifest, "a", store,
                                      _runtime(store), limits)
             if i < 5:
-                assert res == "bounce"
+                assert res.action is DeliveryAction.BOUNCE
             else:
-                assert res == "blocked"
+                assert res.action is DeliveryAction.BLOCKED
+                assert res.blocked_reason is DeliveryBlockReason.RETRY_EXHAUSTED
         assert store.get_work_item(item.id).bounces.merge == 5
 
     def test_merge_configured_without_pr_url_blocks_with_teaching(self, tmp_path):
@@ -395,14 +407,67 @@ class TestRunMergeDeliveryUnit:
         res = run_merge_delivery(
             _merge_config(script), manifest, "a", store, _runtime(store),
             dict(DEFAULT_RETRY))
-        assert res == "blocked"
+        assert res.action is DeliveryAction.BLOCKED
+        assert res.blocked_reason is DeliveryBlockReason.MISSING_PR
         assert manifest.nodes["a"].status == "blocked"
         comments = store.get_comments(item.id)
         assert any("pr_url" in c for c in comments)
         assert any("omac work submit" in c for c in comments)
 
+    def test_merge_without_delivered_revision_reports_missing_revision(self):
+        store = _store()
+        item = _review_passed_item(store)
+        store.update_work_item_metadata(item.id, verification={})
+        manifest = Manifest(meta={}, nodes={"a": _node()})
+        manifest.nodes["a"].work_item_id = item.id
+        manifest.nodes["a"].status = "in_review"
+
+        result = run_merge_delivery(
+            {}, manifest, "a", store, _runtime(store), dict(DEFAULT_RETRY))
+
+        assert result.action is DeliveryAction.BLOCKED
+        assert result.blocked_reason is DeliveryBlockReason.MISSING_REVISION
+        assert manifest.nodes["a"].status == "blocked"
+        assert store.get_work_item(item.id).status is WorkItemStatus.BLOCKED
+
 
 class TestAdapterDeliveryExecution:
+    @pytest.mark.parametrize("error", [
+        AuthError("assignment auth failed"),
+        PlatformError("assignment platform failed"),
+    ])
+    def test_merge_assignment_failure_rolls_back_retry_and_blocks(
+        self, monkeypatch, error,
+    ):
+        store = _store()
+        item = _review_passed_item(store)
+        manifest = Manifest(meta={}, nodes={"a": _node()})
+        manifest.nodes["a"].work_item_id = item.id
+        manifest.nodes["a"].status = "in_review"
+        monkeypatch.setattr(
+            store,
+            "merge_pull_request",
+            lambda *args, **kwargs: _command_result(
+                DeliveryCommandOutcome.FAILED, exit_code=1, output="conflict"),
+        )
+        monkeypatch.setattr(
+            store,
+            "assign_work_item",
+            lambda *args, **kwargs: (_ for _ in ()).throw(error),
+        )
+
+        result = run_merge_delivery(
+            {}, manifest, "a", store, _runtime(store), dict(DEFAULT_RETRY)
+        )
+
+        assert result.action is DeliveryAction.BLOCKED
+        assert result.blocked_reason is DeliveryBlockReason.ASSIGNMENT_FAILED
+        assert str(error) in result.detail
+        assert store.get_work_item(item.id).bounces.merge == 0
+        assert store.get_work_item(item.id).status is WorkItemStatus.BLOCKED
+        assert store.get_work_item(item.id).review_verdict is None
+        assert manifest.nodes["a"].status == "blocked"
+
     def test_merge_executes_through_store_adapter(self, monkeypatch):
         store = _store()
         item = _review_passed_item(store)
@@ -422,9 +487,10 @@ class TestAdapterDeliveryExecution:
 
         monkeypatch.setattr(store, "merge_pull_request", merge_pull_request)
 
-        assert run_merge_delivery(
+        result = run_merge_delivery(
             {}, manifest, "a", store, _runtime(store), dict(DEFAULT_RETRY)
-        ) == "pass"
+        )
+        assert result.action is DeliveryAction.PASS
         assert seen == {
             "pr_url": "https://github.com/acme/project/pull/1",
             "delivered_revision": "delivered-sha",
@@ -493,16 +559,19 @@ class TestAdapterDeliveryExecution:
         )
 
         limits = {**DEFAULT_RETRY, "merge": 1}
-        assert run_merge_delivery(
+        result = run_merge_delivery(
             {}, manifest, "a", store, _runtime(store), limits
-        ) == "bounce"
+        )
+        assert result.action is DeliveryAction.BOUNCE
         assert store.get_work_item(item.id).bounces.merge == 1
 
         manifest.nodes["a"].status = "in_review"
         store.update_status(item.id, WorkItemStatus.DONE)
-        assert run_merge_delivery(
+        result = run_merge_delivery(
             {}, manifest, "a", store, _runtime(store), limits
-        ) == "blocked"
+        )
+        assert result.action is DeliveryAction.BLOCKED
+        assert result.blocked_reason is DeliveryBlockReason.RETRY_EXHAUSTED
         assert store.get_work_item(item.id).bounces.merge == 1
 
     def test_merge_wake_failure_rolls_back_retry_and_blocks(self, monkeypatch):
@@ -522,9 +591,12 @@ class TestAdapterDeliveryExecution:
             def wake(self, item_id, agent, role):
                 raise PlatformError("runtime unavailable")
 
-        assert run_merge_delivery(
+        result = run_merge_delivery(
             {}, manifest, "a", store, FailingRuntime(), dict(DEFAULT_RETRY)
-        ) == "blocked"
+        )
+        assert result.action is DeliveryAction.BLOCKED
+        assert result.blocked_reason is DeliveryBlockReason.WAKE_FAILED
+        assert "runtime unavailable" in result.detail
         assert manifest.nodes["a"].status == "blocked"
         assert store.get_work_item(item.id).status is WorkItemStatus.BLOCKED
         assert store.get_work_item(item.id).bounces.merge == 0
@@ -570,16 +642,19 @@ class TestAdapterDeliveryExecution:
 
         config = {"ci": {"check_command": "pytest", "timeout_minutes": 1}}
         limits = {**DEFAULT_RETRY, "ci": 1}
-        assert advance_delivery(
+        result = advance_delivery(
             config, manifest, "a", store, _runtime(store), limits
-        ) == "bounce"
+        )
+        assert result.action is DeliveryAction.BOUNCE
         assert store.get_work_item(item.id).bounces.ci == 1
 
         manifest.nodes["a"].status = "in_progress"
         store.update_status(item.id, WorkItemStatus.DONE)
-        assert advance_delivery(
+        result = advance_delivery(
             config, manifest, "a", store, _runtime(store), limits
-        ) == "blocked"
+        )
+        assert result.action is DeliveryAction.BLOCKED
+        assert result.blocked_reason is DeliveryBlockReason.RETRY_EXHAUSTED
         assert store.get_work_item(item.id).bounces.ci == 1
 
 

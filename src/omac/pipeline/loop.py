@@ -18,7 +18,12 @@ from ..core.manifest import (
     Manifest, project_root_from_manifest_path, save_manifest, set_node,
 )
 from ..pipeline.delivery import advance_delivery, run_merge_delivery
-from ..engines.models import WorkItemStatus
+from ..engines.models import (
+    DeliveryAction,
+    DeliveryBlockReason,
+    DeliveryResult,
+    WorkItemStatus,
+)
 from ..engines.runtime import AgentRuntime
 from ..engines.store import WorkItemStore
 from ..errors import PlatformError, ValidationError
@@ -47,6 +52,33 @@ _PLATFORM_TO_MANIFEST: Dict[str, str] = {
     "failed": "failed",
     "blocked": "blocked",
 }
+
+
+def _delivery_block_message(stage: str, result: DeliveryResult) -> str:
+    """把结构化 delivery 阻塞原因转换成可操作的用户报告。"""
+    reason = result.blocked_reason
+    if reason is DeliveryBlockReason.RETRY_EXHAUSTED:
+        retry_key = "ci" if stage == "CI" else "merge"
+        return ui(
+            f"{stage} failed and retry.{retry_key} is exhausted.",
+            f"{stage} 失败，回退上界(retry.{retry_key})已耗尽")
+    if reason is DeliveryBlockReason.ASSIGNMENT_FAILED:
+        return ui(
+            f"{stage} worker assignment failed: {result.detail}",
+            f"{stage} 回派 worker 的 assignment 失败: {result.detail}")
+    if reason is DeliveryBlockReason.WAKE_FAILED:
+        return ui(
+            f"{stage} worker wake failed: {result.detail}",
+            f"{stage} 回派 worker 的 wake 失败: {result.detail}")
+    if reason is DeliveryBlockReason.MISSING_PR:
+        return ui(
+            f"{stage} cannot continue because pr_url is missing.",
+            f"{stage} 无法继续：缺少 pr_url")
+    if reason is DeliveryBlockReason.MISSING_REVISION:
+        return ui(
+            f"{stage} cannot continue because delivered_revision is missing.",
+            f"{stage} 无法继续：缺少 delivered_revision")
+    raise ValueError(f"Unsupported delivery block reason: {reason}")
 
 
 def _store_env(store: WorkItemStore) -> dict:
@@ -401,38 +433,32 @@ def collect_results(
                 ci_action = advance_delivery(
                     config or {}, manifest, key, store, runtime, limits,
                     project_root=project_root_from_manifest_path(manifest_path))
-                if ci_action == "bounce":
+                if ci_action.action is DeliveryAction.BOUNCE:
                     failures[key] = ui(
                         "CI failed; returned to the worker for resubmission.",
                         "CI 未通过,已转回 worker(上界未耗尽,待重交)")
                     log.info(logsetup.EVT_REVISION, kind=_DAG_KIND, node=key,
                              id=node.work_item_id, gate="ci")
                     continue
-                if ci_action == "blocked":
-                    failures[key] = ui(
-                        "CI failed and retry.ci is exhausted.",
-                        "CI 检查未通过,回退上界(retry.ci)已耗尽")
+                if ci_action.action is DeliveryAction.BLOCKED:
+                    failures[key] = _delivery_block_message("CI", ci_action)
                     log.info(logsetup.EVT_NODE_FAILED, kind=_DAG_KIND, node=key,
-                             id=node.work_item_id, reason=ui(
-                                 "CI retry limit exhausted", "CI 回退上界已耗尽"))
+                             id=node.work_item_id, reason=failures[key])
                     continue
                 # CI 绿(或无可用 CI 而跳过):nits follow-up 已经由上一轮 reviewer 接受,
                 # worker 修完后直接进入 merge/done,不再浪费第二轮 reviewer。
                 if item.review_verdict == "pass-with-nits":
                     merge_action = run_merge_delivery(
                         config or {}, manifest, key, store, runtime, limits)
-                    if merge_action == "pass":
+                    if merge_action.action is DeliveryAction.PASS:
                         store.update_status(node.work_item_id, WorkItemStatus.DONE)
                         set_node(manifest, key, status="done")
                         log.info(logsetup.EVT_NODE_DONE, kind=_DAG_KIND, node=key,
                                  id=node.work_item_id)
-                    elif merge_action == "blocked":
-                        failures[key] = ui(
-                            "Merge failed and retry.merge is exhausted.",
-                            "merge 失败,回退上界(retry.merge)已耗尽")
+                    elif merge_action.action is DeliveryAction.BLOCKED:
+                        failures[key] = _delivery_block_message("Merge", merge_action)
                         log.info(logsetup.EVT_NODE_FAILED, kind=_DAG_KIND, node=key,
-                                 id=node.work_item_id, reason=ui(
-                                     "Merge retry limit exhausted", "merge 回退上界已耗尽"))
+                                 id=node.work_item_id, reason=failures[key])
                 elif node.reviewer:
                     pending_review.append((key, node.work_item_id, node.reviewer))
                 else:
@@ -519,18 +545,15 @@ def collect_results(
                 # 使用默认 gh pr merge 命令。
                 merge_action = run_merge_delivery(
                     config or {}, manifest, key, store, runtime, limits)
-                if merge_action == "pass":
+                if merge_action.action is DeliveryAction.PASS:
                     store.update_status(node.work_item_id, WorkItemStatus.DONE)
                     set_node(manifest, key, status="done")
                     log.info(logsetup.EVT_NODE_DONE, kind=_DAG_KIND, node=key,
                              id=node.work_item_id)
-                elif merge_action == "blocked":
-                    failures[key] = ui(
-                        "Merge failed and retry.merge is exhausted.",
-                        "merge 失败,回退上界(retry.merge)已耗尽")
+                elif merge_action.action is DeliveryAction.BLOCKED:
+                    failures[key] = _delivery_block_message("Merge", merge_action)
                     log.info(logsetup.EVT_NODE_FAILED, kind=_DAG_KIND, node=key,
-                             id=node.work_item_id, reason=ui(
-                                 "Merge retry limit exhausted", "merge 回退上界已耗尽"))
+                             id=node.work_item_id, reason=failures[key])
                 # else "bounce": 节点已转回 in_progress,本 tick 不再推进。
             else:
                 # reviewer reject 或评审证据不合格:有界「回到 worker」回退,

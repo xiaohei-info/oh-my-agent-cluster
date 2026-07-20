@@ -16,8 +16,14 @@ from omac.core.manifest import Contract, Manifest, Node, load_manifest, save_man
 from omac.engines import create_engine
 from omac.engines.mock import MockRuntime, MockStore
 from omac.core.taskmeta import TaskPhase
-from omac.engines.models import EngineConfig, WorkItemStatus
-from omac.pipeline.loop import TickResult, tick
+from omac.engines.models import (
+    DeliveryAction,
+    DeliveryBlockReason,
+    DeliveryResult,
+    EngineConfig,
+    WorkItemStatus,
+)
+from omac.pipeline.loop import TickResult, collect_results, tick
 
 
 # ==================== fixtures ====================
@@ -469,6 +475,56 @@ class TestHappyPath:
 # ==================== 2. 失败注入 → needs_decision ====================
 
 class TestFailureInjection:
+    @pytest.mark.parametrize(("reason", "expected"), [
+        (DeliveryBlockReason.RETRY_EXHAUSTED, "retry.merge"),
+        (DeliveryBlockReason.ASSIGNMENT_FAILED, "assignment failed"),
+        (DeliveryBlockReason.WAKE_FAILED, "wake failed"),
+        (DeliveryBlockReason.MISSING_PR, "pr_url"),
+        (DeliveryBlockReason.MISSING_REVISION, "delivered_revision"),
+    ])
+    def test_merge_block_reports_actual_delivery_reason(
+        self, tmp_path, monkeypatch, reason, expected,
+    ):
+        node = _node("a")
+        node.status = "in_review"
+        manifest = _manifest([node])
+        path = _tmp_manifest_path(manifest)
+        eng = _engine(MOCK_AUTO_COMPLETE="false")
+        item = eng.store.create_work_item(
+            "ws", "a", "d", dag_key="a", worker="alice", reviewer="bob",
+            initial_status=WorkItemStatus.IN_REVIEW,
+        )
+        eng.store.update_work_item_metadata(
+            item.id,
+            artifacts={"pr_url": "https://mock.example.com/pr/1"},
+            verification=_verification(),
+            review_verdict="pass",
+            review_report=_review_report("pass"),
+        )
+        eng.store.update_status(item.id, WorkItemStatus.DONE)
+        node.work_item_id = item.id
+        save_manifest(manifest, path)
+
+        monkeypatch.setattr(
+            "omac.pipeline.loop.validate_review_evidence",
+            lambda *args, **kwargs: [],
+        )
+
+        def blocked_delivery(*args, **kwargs):
+            node.status = "blocked"
+            eng.store.update_status(item.id, WorkItemStatus.BLOCKED)
+            return DeliveryResult(
+                action=DeliveryAction.BLOCKED,
+                blocked_reason=reason,
+                detail="handoff detail",
+            )
+
+        monkeypatch.setattr("omac.pipeline.loop.run_merge_delivery", blocked_delivery)
+
+        failures = collect_results(eng.store, eng.runtime, manifest, path)
+
+        assert expected in failures["a"]
+
     def test_failed_node_and_downstream_blocked(self):
         """a 失败 → a blocked,下游 b/c blocked,report 完整。"""
         nodes = [

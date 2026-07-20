@@ -118,7 +118,7 @@ def test_worker_role_has_tdd_and_evidence() -> None:
         "TDD", "contract.source_of_truth", "上游 issue", "deliverable/ref",
         "verification", "pr_base", "non_goals", "真实业务功能测试",
         "骨架", "临时实现", "fake", "known_gaps", "runtime_fallbacks",
-        "delivered_revision",
+        "delivered_revision", "同一个 canonical PR", "不得另开平行或替代 PR",
     ]:
         assert item in content, f"worker missing execution anchor: {item}"
 
@@ -164,6 +164,7 @@ def test_manifest_artifact_connects_contract_to_runtime() -> None:
         "source_of_truth", "acceptance", "non_goals", "verification_commands",
         "integration_gates", "pr_base", "quality", "required_outcomes",
         "business_tests", "runtime_data_policy", "real-or-error",
+        "authoring manifest 中禁止出现", "merged_at",
     ]:
         assert item in content, f"manifest artifact missing contract anchor: {item}"
 
@@ -229,6 +230,7 @@ def test_evidence_artifact_defines_all_evidence_shapes() -> None:
         "worker verification", "reviewer report", "final acceptance results",
         "acceptance_mapping", "outcome_mapping", "regression_proof",
         "evidence_origin", "delivered_revision", "reviewed_revision", "review_scope", "findings",
+        "只映射一次", "{reviewed_revision}", "--match-head-commit",
     ]:
         assert item in content, f"evidence artifact missing evidence anchor: {item}"
 

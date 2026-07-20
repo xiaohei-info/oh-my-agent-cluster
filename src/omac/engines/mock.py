@@ -88,9 +88,25 @@ def _write_tmp_json(data) -> str:
 def _write_tmp_manifest(manifest) -> str:
     """把增量 Manifest 序列化为符合 manifest schema 的 YAML 临时文件。"""
     fd, path = tempfile.mkstemp(suffix=".yaml")
-    os.close(fd)
-    from ..core.manifest import save_manifest
-    save_manifest(manifest, path)
+    from ..core.manifest import _dump_contract
+    data = {"meta": dict(manifest.meta or {}), "nodes": []}
+    for node in manifest.nodes.values():
+        raw_node = {
+            "id": node.id,
+            "worker": node.worker,
+            "blocked_by": list(node.blocked_by or []),
+        }
+        for field in ("title", "description", "reviewer", "risk", "gate"):
+            value = getattr(node, field)
+            if value is not None:
+                raw_node[field] = value
+        if node.contract is not None:
+            raw_node["contract"] = _dump_contract(node.contract)
+        data["nodes"].append(raw_node)
+    with os.fdopen(fd, "w", encoding="utf-8") as file:
+        yaml.safe_dump(
+            data, file, default_flow_style=False,
+            allow_unicode=True, sort_keys=False)
     return path
 
 

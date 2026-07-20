@@ -14,8 +14,9 @@ from omac.core.acceptance import load_acceptance_doc
 from omac.core.manifest import Contract, Manifest, Node, load_manifest, save_manifest
 from omac.engines import create_engine
 from omac.engines.mock import MockStore
-from omac.engines.models import EngineConfig
+from omac.engines.models import EngineConfig, WorkItemStatus
 from omac.errors import NeedsDecision
+from omac.core.taskmeta import TaskPhase
 from omac.pipeline.acceptance import (
     acceptance_doc_path, resolve_acceptance_config, AcceptanceOutcome,
     run_acceptance_loop, _resolve_operation_branch,
@@ -86,6 +87,27 @@ def _done_manifest(path):
     })
     save_manifest(m, path)
     return m
+
+
+def _register_authoritative_done(engine, manifest):
+    for key, node in manifest.nodes.items():
+        if node.status != "done":
+            continue
+        item = engine.store.create_work_item(
+            "ws", key, f"completed {key}", dag_key=key,
+            worker=node.worker, reviewer="bob" if node.worker == "alice" else "alice",
+        )
+        engine.store.update_work_item_metadata(
+            item.id,
+            phase=TaskPhase.REVIEW,
+            artifacts={"pr_url": f"https://mock.example.com/pr/{item.id}"},
+            verification={"quality": {"delivered_revision": "head-sha"}},
+            review_verdict="pass",
+            review_report={"reviewed_revision": "head-sha"},
+        )
+        engine.store.update_status(item.id, WorkItemStatus.DONE)
+        node.work_item_id = item.id
+        node.merged = True
 
 
 def _acceptance_doc(flows):
@@ -213,6 +235,7 @@ def test_incremental_decompose_issue_has_failed_flow_and_manifest_context(tmp_pa
     save_manifest(manifest, path)
     doc = _acceptance_doc([("ACC-001", "Login", 1)])
     engine = _engine()
+    _register_authoritative_done(engine, manifest)
     MockStore.set_acceptance_behaviors({
         "final-acceptance-r1": [
             {"id": "ACC-001", "status": "fail", "notes": "broken"},
@@ -258,6 +281,7 @@ def test_e2e_two_fails_then_pass(tmp_path):
     _write_doc(tmp_path, doc)
 
     engine = _engine()
+    _register_authoritative_done(engine, manifest)
 
     # Round 1: 2 fails; Round 2: all pass
     accepted = {
@@ -357,6 +381,7 @@ def test_max_rounds_exhausted(tmp_path):
     _write_doc(tmp_path, doc)
 
     engine = _engine()
+    _register_authoritative_done(engine, manifest)
     # Always fail f2
     accepted = {
         "final-acceptance-r1": [
@@ -398,6 +423,7 @@ def test_increment_persisted_resumable(tmp_path):
     _write_doc(tmp_path, doc)
 
     engine = _engine()
+    _register_authoritative_done(engine, manifest)
     MockStore.set_acceptance_behaviors({
         "final-acceptance-r1": [
             {"id": "f1", "status": "pass"},

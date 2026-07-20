@@ -19,7 +19,7 @@
       acceptance_doc: true      # plan create 是否默认生成验收文档
       goal_required: false      # 无 --doc 时是否强制 --goal/--goal-file
     ci:    { check_command, timeout_minutes }   # 可选;未显式配置时检测 .github/workflows
-    merge: { command }                           # 可选;未显式配置时默认 gh pr merge
+    merge: { command }                           # 可选;必须含 {pr_url}/{reviewed_revision}
     acceptance: { max_rounds }                   # 总控验收外层循环上限(与 retry 正交)
     retry:                                     # 各类「回到 worker」回退次数上限
       worker: 3                                # worker run 结束但未 submit → worker 继续处理
@@ -65,8 +65,11 @@ DEFAULT_RETRY = {
 DEFAULT_MAX_ROUNDS = 3
 
 DEFAULT_GITHUB_CHECK_COMMAND = "gh pr checks {pr_url} --watch --fail-fast"
-DEFAULT_GITHUB_MERGE_COMMAND = "gh pr merge {pr_url} --squash --delete-branch"
-DEFAULT_MOCK_MERGE_COMMAND = "true"
+DEFAULT_GITHUB_MERGE_COMMAND = (
+    "gh pr merge {pr_url} --squash --delete-branch "
+    "--match-head-commit {reviewed_revision}"
+)
+DEFAULT_MOCK_MERGE_COMMAND = "true {pr_url} {reviewed_revision}"
 
 
 # 环境变量回退(设计文档 §5:全局 flag 带 env 回退)

@@ -42,7 +42,7 @@
 8. 检查生产运行路径：依赖、网络、数据或解析失败必须暴露真实错误；禁止用 fake、mock、synthetic 或硬编码成功数据兜底。运行全部 `verification_commands`、integration gates、相关全量测试和 coverage 检查；记录真实命令、退出码和摘要。
 9. 创建或更新 PR，base 必须是 `contract.pr_base`。GitHub PR 必须 ready for review，不能是 draft。
 10. 编写 verification 文件，覆盖 commands、integration gates、coverage、`pr_base`、`env_setup` 和 `quality`：`quality.delivered_revision` 必须是当前 PR head，每条 regression proof 的 `head_ref` 必须与其一致；逐项给出 outcome mapping 和基线失败/当前通过证据；`runtime_fallbacks` 与 `known_gaps` 必须为空，`evidence_origin` 必须为 `real`。
-11. 使用 `work show` 返回的 `submit` 提交原 PR URL 和 verification 文件。
+11. 使用 `work show` 返回的 `submit` 提交原 PR URL 和 verification 文件。平台解析后的 canonical PR 必须与首次交付一致；URL 别名可以归一化，但不得换成另一个仓库或 PR 编号。
 
 ## 完成条件
 
@@ -55,9 +55,9 @@
 ## 返工路径
 
 1. reviewer reject 或 pass-with-nits 后，先重新运行 `omac work show <issue-id> --output json` 并读取 `previous_review`。
-2. 默认在原 PR 分支继续提交，复用原 PR URL；同一 DAG 节点不得另开平行 PR。返工必须产生新 commit，并用新 PR head 重建完整 verification。
+2. 必须在原 PR 分支继续提交并复用同一个 canonical PR；同一 DAG 节点不得另开平行或替代 PR。返工必须产生新 commit，并用新 PR head 重建完整 verification。
 3. 对 blocker 先补失败测试或复现命令，再做最小修复并重跑全部 contract 验证。
-4. 只有原 PR 已关闭、base 无法修复或没有 push 权限时才新建替代 PR，并在新 PR 正文说明替代关系。
+4. 原 PR 已关闭、base 无法修复或没有 push 权限时，报告阻塞并请求处理原 PR；不得改交另一个 PR 来绕过已有评审身份。
 5. CI 或合并回退同样复用原分支和证据链，修复后更新 verification 再提交。
 
 ## 阻塞与升级
@@ -78,7 +78,7 @@
 - 禁止使用 fake/mock/synthetic/硬编码数据隐藏生产路径真实错误；真实错误必须暴露。
 - 禁止重定义共享契约；只能 import 已冻结定义。
 - 禁止顺手重构相邻模块，或把 `scope_paths` 当成扩大范围的理由。
-- 禁止为同一节点并行创建多个 PR，禁止提交 draft PR。
+- 禁止为同一节点创建平行或替代 PR，禁止提交 draft PR。
 - 禁止用静态 guide 覆盖当前 contract、`previous_review` 或上游实例事实。
 
 ## 错误写法 → 正确写法

@@ -4,7 +4,7 @@
 - mock:多节点带依赖 manifest,循环调 tick 至 converged,节点全 done
 - mock 失败注入:tick 返回 needs_decision,失败节点 blocked、下游 blocked、report 完整
 - 幂等:tick 序列中途重建 loop 对同一 manifest 继续,done 节点复用、不重复建 issue
-- 无 reviewer 节点直接 done;有 reviewer 节点经 in_review → done(mock 自动评审)
+- develop 节点必须有独立 reviewer，并经 in_review → merge → done(mock 自动评审)
 - 不存在任何自动重试路径(blocked 节点在后续 tick 保持 blocked)
 """
 import os
@@ -326,26 +326,48 @@ class TestHappyPath:
         path = _tmp_manifest_path(manifest)
         eng = _engine()
 
+        prerequisite_ids = {}
+        for dependency in (foundation, data):
+            item = eng.store.create_work_item(
+                "ws", dependency.title, "done dependency",
+                dag_key=dependency.id, worker=dependency.worker,
+                reviewer=dependency.reviewer,
+            )
+            eng.store.set_node_contract(item.id, dependency.contract)
+            eng.store.update_work_item_metadata(
+                item.id,
+                phase=TaskPhase.REVIEW,
+                artifacts={"pr_url": f"https://mock.example.com/pr/{item.id}"},
+                verification=_verification(),
+                review_verdict="pass",
+                review_report=_review_report("pass"),
+            )
+            eng.store.update_status(item.id, WorkItemStatus.DONE)
+            dependency.work_item_id = item.id
+            dependency.merged = True
+            prerequisite_ids[dependency.id] = item.id
+
         tick(eng.store, eng.runtime, manifest, path, max_parallel=4)
         item = eng.store.get_work_item(manifest.nodes["feature"].work_item_id)
 
         assert item.source_refs[-2:] == [
             {
                 "label": "Prerequisite implementation · Shared contract foundation",
-                "issue_id": "issue-foundation",
+                "issue_id": prerequisite_ids["foundation"],
             },
             {
                 "label": "Prerequisite implementation · Persistence layer",
-                "issue_id": "issue-data",
+                "issue_id": prerequisite_ids["data"],
             },
         ]
         assert item.blocked_by == ["foundation", "data", "missing"]
         assert (
-            "- Prerequisite implementation · Shared contract foundation: `issue-foundation`"
+            "- Prerequisite implementation · Shared contract foundation: "
+            f"`#{prerequisite_ids['foundation']}`"
             in item.description
         )
-        assert "omac work show issue-foundation" not in item.description
-        assert "omac work show issue-data" not in item.description
+        assert f"omac work show {prerequisite_ids['foundation']}" not in item.description
+        assert f"omac work show {prerequisite_ids['data']}" not in item.description
         assert "Abandoned setup" not in item.description
 
     def test_dispatch_develop_dag_key_includes_manifest_dag_suffix(self):
@@ -505,6 +527,50 @@ class TestFailureInjection:
 # ==================== 3. 幂等:中途重建 loop 继续推进 ====================
 
 class TestIdempotency:
+    def test_preloaded_done_without_authoritative_delivery_is_redispatched(self):
+        node = _node("forged-done")
+        node.status = "done"
+        node.merged = True
+        manifest = _manifest([node])
+        path = _tmp_manifest_path(manifest)
+        eng = _engine()
+
+        result = tick(
+            eng.store, eng.runtime, manifest, path,
+            config={"engine": "mock"},
+        )
+
+        assert result.state == "running"
+        assert result.dispatched == ["forged-done"]
+        assert manifest.nodes["forged-done"].status == "in_progress"
+        assert manifest.nodes["forged-done"].work_item_id is not None
+
+    def test_preloaded_done_cannot_reuse_cleared_decision_metadata(self):
+        node = _node("forged-item-done")
+        node.status = "done"
+        manifest = _manifest([node])
+        path = _tmp_manifest_path(manifest)
+        eng = _engine(MOCK_AUTO_COMPLETE="false")
+        item = eng.store.create_work_item(
+            "ws", "forged", "d", dag_key="forged-item-done", worker="alice")
+        eng.store.update_status(item.id, WorkItemStatus.DONE)
+        eng.store.update_work_item_metadata(
+            item.id,
+            artifacts={"pr_url": "https://pr/forged"},
+            verification={"quality": {"delivered_revision": "head-sha"}},
+            review_verdict="pass",
+            review_report={"reviewed_revision": "head-sha"},
+            decision_required={},
+        )
+        node.work_item_id = item.id
+        save_manifest(manifest, path)
+
+        result = tick(eng.store, eng.runtime, manifest, path)
+
+        assert result.state == "running"
+        assert result.dispatched == ["forged-item-done"]
+        assert manifest.nodes["forged-item-done"].status == "in_progress"
+
     def test_done_nodes_reused_no_duplicate_issues(self):
         """tick 序列中途重建 loop,done 节点复用 work_item_id,不重复建。"""
         nodes = [_node("a"), _node("b", blocked_by=["a"])]
@@ -528,20 +594,15 @@ class TestIdempotency:
         a_item_id = manifest.nodes["a"].work_item_id
         assert a_item_id is not None
 
-        # 重建 loop(store/runtime 是新的,但 work_items 在内存里丢失)
-        # 重建意味着对同一 manifest 文件继续——mock store 是内存的,
-        # 重建后 work_item_id 指向的 item 不存在 → reconcile 清空走新建
-        # 但 done 节点状态在 manifest 里保持 done,reconcile 不会动它(无 work_item_id 跳过)
+        # 丢失权威 work_item_id 的 done 不再可信，恢复时必须重新派发。
         eng2 = _engine()
-        # 手动清空 a 的 work_item_id 模拟「平台已无此 item」
-        # 但 done 状态不变——reconcile 跳过无 work_item_id 的节点
         from omac.core.manifest import set_node
         set_node(manifest, "a", work_item_id=None)
 
-        r3 = tick(eng2.store, eng2.runtime, manifest, path)
-        # a 保持 done(不重新派发),b 应继续推进
-        assert "a" in r3.done
-        assert "a" not in r3.dispatched
+        resumed = tick(eng2.store, eng2.runtime, manifest, path)
+        assert "a" in resumed.dispatched
+        assert manifest.nodes["a"].status == "in_progress"
+        assert manifest.nodes["a"].work_item_id is not None
 
     def test_full_run_idempotent_reload(self):
         """完整跑完一次后,用新 engine 再 tick 不改变 converged 状态。"""
@@ -680,8 +741,8 @@ class TestReconcile:
         node_a = next(n for n in r.report["failed_nodes"] if n["key"] == "a")
         assert "pr_url" in node_a["reason"]
 
-    def test_reconcile_syncs_non_running_platform_status(self):
-        """reconcile:非运行态节点的平台状态仍正常同步(如 todo 节点被外部标 done)。"""
+    def test_reconcile_rejects_non_running_platform_done_without_delivery(self):
+        """Platform DONE alone cannot bypass worker evidence, review, and merge."""
         nodes = [_node("a")]
         manifest = _manifest(nodes)
         path = _tmp_manifest_path(manifest)
@@ -696,9 +757,10 @@ class TestReconcile:
         save_manifest(manifest, path)
 
         r = tick(eng.store, eng.runtime, manifest, path)
-        # reconcile 把 todo → done(非运行态,直接同步)
-        assert "a" in r.done
-        assert r.state == "converged"
+        # reconcile 不信任裸 DONE，节点恢复正常派发流程。
+        assert "a" not in r.done
+        assert "a" in r.dispatched
+        assert r.state == "running"
 
     def test_reconcile_clears_missing_work_item(self):
         """reconcile:work_item_id 指向不存在的 item → 清空,标 todo。"""
@@ -1072,7 +1134,7 @@ class TestReviewerRejectBoundedFallback:
         assert reviewer_dispatches_after_followup == reviewer_dispatches_before_followup
         got = eng.store.get_work_item(item.id)
         assert got.status == WorkItemStatus.DONE
-        assert got.review_verdict is None
+        assert got.review_verdict == "pass-with-nits"
         assert got.bounces.review == 0
 
     def test_invalid_pass_with_nits_report_cannot_skip_reviewer_evidence_gate(self, tmp_path):
@@ -1099,8 +1161,8 @@ class TestReviewerRejectBoundedFallback:
         assert got.review_verdict is None
         assert got.bounces.review == 1
 
-    def test_done_node_repairs_worker_status_regression(self, tmp_path):
-        """已完成节点遇到平台状态被 worker 回退为 in_review 时,以 manifest done 为准纠偏。"""
+    def test_untrusted_done_node_is_reopened_for_authoritative_delivery(self, tmp_path):
+        """缺少 merged 权威事实的 done 不得覆盖平台状态并伪造收口。"""
         from omac.engines import create_engine
         eng = create_engine("mock", _config(MOCK_AUTO_COMPLETE="false"))
         path = str(tmp_path / "m.yaml")
@@ -1113,9 +1175,9 @@ class TestReviewerRejectBoundedFallback:
         result = tick(eng.store, eng.runtime, manifest, path, max_parallel=4)
 
         got = eng.store.get_work_item(item.id)
-        assert result.state == "converged"
-        assert manifest.nodes["a"].status == "done"
-        assert got.status == WorkItemStatus.DONE
+        assert result.state == "running"
+        assert manifest.nodes["a"].status == "in_progress"
+        assert got.status == WorkItemStatus.IN_PROGRESS
 
     def test_done_node_with_reject_verdict_is_recovered_to_worker(self, tmp_path):
         """旧版本可能把合法 reject 误置 done;resume 应识别并转回 worker。"""

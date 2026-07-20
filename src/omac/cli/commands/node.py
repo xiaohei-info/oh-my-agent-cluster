@@ -245,8 +245,10 @@ def _cmd_retry(args) -> int:
             if "not found" not in message and "不存在" not in message:
                 raise
 
-    # 重置为 todo;work_item_id 保留(同一 issue 续用)。
+    # 重置为 todo;work_item_id 保留(同一 issue 续用)，旧 merge 事实失效。
     node.status = "todo"
+    node.merged = False
+    node.merged_at = None
     save_manifest(manifest, args.manifest)
 
     print_json({
@@ -276,7 +278,7 @@ def _cmd_accept(args) -> int:
                 "节点有 work_item_id,但无法解析引擎配置；为避免 manifest 与平台状态分裂,请先配置 OMAC_ENGINE/OMAC_WORKSPACE_ID 或 .omac/config.yaml"))
         engine.store.update_work_item_metadata(
             node.work_item_id,
-            decision_required={},
+            decision_required={"action": "accepted"},
         )
         engine.store.update_status(node.work_item_id, WorkItemStatus.DONE)
 

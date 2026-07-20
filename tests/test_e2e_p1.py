@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Optional
 
 import pytest
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -235,13 +236,10 @@ class TestAbandon:
         assert r.returncode == exit_codes.OK, r.stderr
         data = _parse_json(r.stdout)
         assert data["state"] == "converged", data
-        # 用 dag status 拿到完整节点表,断言 abandon 状态保留
-        r_status = _run(
-            ["dag", "status", str(manifest), "--output", "json"],
-            cwd=tmp_path,
-        )
-        status = _parse_json(r_status.stdout)
-        by_key = {n["key"]: n for n in status["nodes"]}
+        # mock store 不跨 CLI 子进程持久化；直接读取本轮 dag run 写回的 manifest，
+        # 避免新 status 进程把缺少平台权威记录的 done 当成可信交付。
+        raw = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+        by_key = {node["id"]: node for node in raw["nodes"]}
         assert by_key["smoke-A"]["status"] == "abandoned"
         assert by_key["smoke-B"]["status"] == "done"
         assert by_key["smoke-C"]["status"] == "done"

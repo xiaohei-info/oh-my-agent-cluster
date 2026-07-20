@@ -111,7 +111,7 @@ must be acyclic.
 | `title` / `description` | Short explanation; description references facts, not copied design body. |
 | `worker` / `reviewer` | Both are required current-pool members; reviewer differs from worker. |
 | `blocked_by` | Actual prerequisite node IDs; use `[]` when none. |
-| `work_item_id` / `status` | Runtime-populated facts; do not invent them during authoring. |
+| `status` / `work_item_id` / `merged` / `merged_at` | Runtime-only facts populated by OMAC; authoring manifests must omit them even when a value looks like a default. |
 | `contract` | The node's only implementation and review contract. |
 
 ### Complete contract
@@ -138,6 +138,11 @@ Each integration gate has `name`, `layer`, `delivery_goal`, and non-empty
 `required_metrics` is an object and `artifacts` is a list. Worker verification
 and reviewer reports repeat gate names, commands, sources, and goals from the
 contract.
+
+An authoring manifest declares work and contracts only. It must not contain
+`status`, `work_item_id`, `merged`, or `merged_at`; dispatch, review, and merge
+write those fields from authoritative platform facts. Preloading them cannot
+skip dispatch, evidence validation, review, or merge.
 
 Contracts must be independently executable by low-reasoning-budget workers;
 state edge cases, prohibited scope, verification entry points, and integration

@@ -132,7 +132,8 @@ def _validate_integration_gate_evidence(expected_gate, actual_gate, *, prefix):
 def _has_pr_url(artifacts) -> bool:
     if not isinstance(artifacts, dict):
         return False
-    return bool(artifacts.get("pr_url") or artifacts.get("pr"))
+    pr_url = artifacts.get("pr_url") or artifacts.get("pr")
+    return isinstance(pr_url, str) and bool(pr_url.strip())
 
 
 def _requires_env_setup(contract) -> bool:
@@ -157,6 +158,37 @@ def _matches_finding_ids(value, expected_ids: set[str]) -> bool:
         and len(value) == len(set(value))
         and set(value) == expected_ids
     )
+
+
+def _strict_mapping_by_key(
+    mappings,
+    *,
+    key_field: str,
+    expected_keys: set[str],
+    allowed_statuses: set[str],
+    prefix: str,
+    label: str,
+):
+    errors = []
+    mapping_by_key = {}
+    for index, mapping in enumerate(mappings):
+        item_prefix = f"{prefix}[{index}]"
+        if not isinstance(mapping, dict):
+            errors.append(f"{item_prefix} must be an object")
+            continue
+        key = mapping.get(key_field)
+        if not isinstance(key, str) or not key.strip():
+            errors.append(f"{item_prefix}.{key_field} is required")
+            continue
+        if key in mapping_by_key:
+            errors.append(f"duplicate {label} mapping: {key}")
+        else:
+            mapping_by_key[key] = mapping
+        if key not in expected_keys:
+            errors.append(f"unknown {label} mapping: {key}")
+        if mapping.get("status") not in allowed_statuses:
+            errors.append(f"{item_prefix}.status is invalid")
+    return mapping_by_key, errors
 
 
 def delivered_revision_of(verification):
@@ -458,10 +490,17 @@ def validate_worker_evidence(
             errors.append("contract.integration_gates must be a list")
             expected_gates = []
         for expected_gate in expected_gates:
+            if not isinstance(expected_gate, dict):
+                errors.append("contract integration gate must be an object")
+                continue
+            gate_name = expected_gate.get("name")
+            if not isinstance(gate_name, str) or not gate_name.strip():
+                errors.append("contract integration gate name must be a non-empty string")
+                continue
             errors.extend(
                 _validate_integration_gate_evidence(
                     expected_gate,
-                    integration_gate_by_name.get(expected_gate.get("name")),
+                    integration_gate_by_name.get(gate_name),
                     prefix="verification",
                 )
             )
@@ -549,7 +588,9 @@ def validate_review_evidence(
     reviewed_revision = report.get("reviewed_revision")
     delivered_revision = delivered_revision_of(
         getattr(item, "verification", None))
-    if delivered_revision and reviewed_revision != delivered_revision:
+    if expected_revision and delivered_revision is None:
+        errors.append("review_report Worker delivered_revision is required")
+    elif delivered_revision and reviewed_revision != delivered_revision:
         errors.append(
             "review_report.reviewed_revision must match Worker delivered_revision: "
             f"expected {delivered_revision}, got {reviewed_revision}"
@@ -563,45 +604,65 @@ def validate_review_evidence(
     mappings = report.get("acceptance_mapping")
     if not isinstance(mappings, list) or not mappings:
         errors.append("review_report.acceptance_mapping must be non-empty")
-        return errors
+        mappings = []
 
     required_statuses = {"pass"} if verdict in REVIEW_APPROVE else {"pass", "fail"}
-    mapped_acceptance = {
-        mapping.get("acceptance")
-        for mapping in mappings
-        if (
-            isinstance(mapping, dict)
-            and isinstance(mapping.get("acceptance"), str)
-            and mapping.get("acceptance").strip()
-            and mapping.get("status") in required_statuses
-        )
-    }
-    if contract is not None:
-        for acceptance in contract.acceptance:
-            if acceptance not in mapped_acceptance:
-                errors.append(f"review_report missing acceptance mapping: {acceptance}")
+    expected_acceptance = set()
+    contract_acceptance = contract.acceptance
+    if not isinstance(contract_acceptance, list):
+        errors.append("contract acceptance must be a list")
+        contract_acceptance = []
+    for acceptance in contract_acceptance:
+        if not isinstance(acceptance, str) or not acceptance.strip():
+            errors.append("contract acceptance must contain non-empty strings")
+            continue
+        expected_acceptance.add(acceptance)
+    mapped_acceptance, mapping_errors = _strict_mapping_by_key(
+        mappings,
+        key_field="acceptance",
+        expected_keys=expected_acceptance,
+        allowed_statuses=required_statuses,
+        prefix="review_report.acceptance_mapping",
+        label="acceptance",
+    )
+    errors.extend(mapping_errors)
+    for acceptance in sorted(expected_acceptance):
+        if acceptance not in mapped_acceptance:
+            errors.append(f"review_report missing acceptance mapping: {acceptance}")
 
     if contract.integration_gates:
         integration_mappings = report.get("integration_gate_mapping")
         if not isinstance(integration_mappings, list) or not integration_mappings:
             errors.append("review_report.integration_gate_mapping must be non-empty")
         else:
-            mapping_by_gate = {
-                mapping.get("gate"): mapping
-                for mapping in integration_mappings
-                if (
-                    isinstance(mapping, dict)
-                    and isinstance(mapping.get("gate"), str)
-                    and mapping.get("gate").strip()
-                    and mapping.get("status") == "pass"
-                )
-            }
             expected_gates = contract.integration_gates
             if not isinstance(expected_gates, list):
                 errors.append("contract.integration_gates must be a list")
                 expected_gates = []
+            expected_gate_names = set()
+            for expected_gate in expected_gates:
+                gate_name = (
+                    expected_gate.get("name")
+                    if isinstance(expected_gate, dict) else None
+                )
+                if not isinstance(gate_name, str) or not gate_name.strip():
+                    errors.append(
+                        "contract integration gate name must be a non-empty string")
+                    continue
+                expected_gate_names.add(gate_name)
+            mapping_by_gate, gate_mapping_errors = _strict_mapping_by_key(
+                integration_mappings,
+                key_field="gate",
+                expected_keys=expected_gate_names,
+                allowed_statuses={"pass"},
+                prefix="review_report.integration_gate_mapping",
+                label="integration gate",
+            )
+            errors.extend(gate_mapping_errors)
             for expected_gate in expected_gates:
                 gate_name = expected_gate.get("name") if isinstance(expected_gate, dict) else None
+                if not isinstance(gate_name, str) or not gate_name.strip():
+                    continue
                 errors.extend(
                     _validate_integration_gate_evidence(
                         expected_gate,

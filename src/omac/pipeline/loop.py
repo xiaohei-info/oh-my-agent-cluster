@@ -155,17 +155,36 @@ def reconcile(store: WorkItemStore, manifest: Manifest, manifest_path: str) -> b
     """
     changed = False
     for key, node in manifest.nodes.items():
+        if node.status == "done" and not node.work_item_id:
+            node.status = "todo"
+            node.merged = False
+            node.merged_at = None
+            changed = True
+            continue
         if not node.work_item_id:
             continue
         try:
             item = store.get_work_item(node.work_item_id)
         except Exception:
-            # work item 不存在:调用者明确接受的终态(done/abandoned)保持;
-            # blocked/failed/cancelled 可能是用户删掉平台 issue 后的恢复路径,
-            # 应清空旧 id 走新建。
-            if node.status not in {"done", "abandoned"}:
+            # abandoned 是调用者显式决策；其他状态必须有平台权威记录。
+            if node.status != "abandoned":
                 set_node(manifest, key, work_item_id=None, status="todo")
+                node.merged = False
+                node.merged_at = None
                 changed = True
+            continue
+
+        # abandoned 是调用者显式决策，不要求交付证据，也不应被平台投影或
+        # dag_key 修复逻辑改写。
+        if node.status == "abandoned":
+            continue
+
+        expected_dag_key = _develop_dag_key(manifest, key)
+        if getattr(item, "dag_key", None) != expected_dag_key:
+            set_node(manifest, key, work_item_id=None, status="todo")
+            node.merged = False
+            node.merged_at = None
+            changed = True
             continue
 
         # reviewer reject 后，worker 可在 manifest 仍 todo/blocked/done 时通过正式
@@ -183,13 +202,8 @@ def reconcile(store: WorkItemStore, manifest: Manifest, manifest_path: str) -> b
         if node.status in RUNNING_STATUSES:
             continue
 
-        # abandoned 是调用者显式决策(omac node abandon),不归 reconcile 同步,
-        # 否则平台侧仍 DONE/BLOCKED 的 work_item 会把 manifest 的 abandoned 覆盖回 done/blocked
-        if node.status == "abandoned":
-            continue
-
         # done 是 OMAC 已收口的业务状态。若 worker/平台把投影回退为 in_review/in_progress,
-        # 不反向污染 manifest,而是把平台投影修回 done。
+        # 只有自动 merge 或显式 node accept 形成的权威事实才可继续保留 done。
         if node.status == "done":
             # 兼容旧版本坏状态:结构合法的 reject 曾可能被误收口为 done。
             # reject 是业务未通过,必须回到 review 回收路径处理有界返工。
@@ -197,13 +211,35 @@ def reconcile(store: WorkItemStore, manifest: Manifest, manifest_path: str) -> b
                 set_node(manifest, key, status="in_review")
                 changed = True
                 continue
-            if item.review_verdict == "pass-with-nits":
-                store.reset_review(node.work_item_id)
-            if item.status != WorkItemStatus.DONE:
-                store.update_status(node.work_item_id, WorkItemStatus.DONE)
+            explicitly_accepted = bool(
+                item.status == WorkItemStatus.DONE
+                and item.decision_required == {"action": "accepted"}
+            )
+            merged_delivery = bool(
+                item.status == WorkItemStatus.DONE
+                and node.merged
+                and item.review_verdict in {"pass", "pass-with-nits"}
+                and item.review_report
+                and item.artifacts
+                and item.verification
+            )
+            if not explicitly_accepted and not merged_delivery:
+                set_node(manifest, key, status="todo")
+                node.merged = False
+                node.merged_at = None
+                changed = True
             continue
 
         platform_status = item.status.value if hasattr(item.status, "value") else str(item.status)
+        if platform_status == WorkItemStatus.DONE.value:
+            # 平台 DONE 只是投影，不足以证明业务交付完成。运行中节点交给
+            # collect_results 过证据/review/merge 门；其他状态保持或恢复 todo。
+            if node.status not in RUNNING_STATUSES and node.status != "todo":
+                set_node(manifest, key, status="todo")
+                node.merged = False
+                node.merged_at = None
+                changed = True
+            continue
         manifest_status = _PLATFORM_TO_MANIFEST.get(platform_status, platform_status)
         if manifest_status != node.status:
             # manifest==todo 是一个显式意图(首次派发 或 node retry 写回)。
@@ -383,7 +419,6 @@ def collect_results(
                     merge_action = run_merge_delivery(
                         config or {}, manifest, key, store, runtime, limits)
                     if merge_action == "pass":
-                        store.reset_review(node.work_item_id)
                         store.update_status(node.work_item_id, WorkItemStatus.DONE)
                         set_node(manifest, key, status="done")
                         log.info(logsetup.EVT_NODE_DONE, kind=_DAG_KIND, node=key,

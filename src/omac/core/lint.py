@@ -34,8 +34,9 @@ def _integration_gate_errors(prefix: str, gate, index: int) -> list:
         return [f"{gate_prefix} must be an object"]
 
     for field in ("name", "layer", "delivery_goal"):
-        if not gate.get(field):
-            errs.append(f"{gate_prefix}.{field} is required")
+        value = gate.get(field)
+        if not isinstance(value, str) or not value.strip():
+            errs.append(f"{gate_prefix}.{field} must be a non-empty string")
 
     for field in ("source_of_truth", "covers", "acceptance_refs", "commands"):
         value = gate.get(field)
@@ -89,6 +90,25 @@ def _contract_errors(node) -> list:
     for required_path in required_contracts:
         if not os.path.exists(required_path):
             errs.append(f"{prefix}.required_contracts path does not exist: {required_path}")
+    return errs
+
+
+def authoring_runtime_field_errors(manifest: Manifest) -> list:
+    """Reject runtime state smuggled into newly authored manifest nodes."""
+    errs = []
+    for node in manifest.nodes.values():
+        if node.status != "todo":
+            errs.append(
+                f"node {node.id}: runtime field status must be omitted or todo")
+        if node.work_item_id is not None:
+            errs.append(
+                f"node {node.id}: runtime field work_item_id is forbidden in authoring")
+        if node.merged:
+            errs.append(
+                f"node {node.id}: runtime field merged is forbidden in authoring")
+        if node.merged_at is not None:
+            errs.append(
+                f"node {node.id}: runtime field merged_at is forbidden in authoring")
     return errs
 
 
@@ -258,7 +278,7 @@ def lint_increment(increment: Manifest, existing: Manifest, pool: set) -> list:
     注意:不重复检查已有节点的 worker/contract(它们已过门);只检查增量节点
     以及「增量节点依赖的集合」。
     """
-    errs = []
+    errs = authoring_runtime_field_errors(increment)
     combined_keys = set(existing.nodes) | set(increment.nodes)
 
     for n in increment.nodes.values():

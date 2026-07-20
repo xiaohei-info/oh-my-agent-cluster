@@ -127,3 +127,15 @@ def test_lint_increment_preserves_existing_done():
     inc = _manifest(_node("fix-1", worker="bob", blocked_by=["a"]))
     # worker bob is in pool; should be clean
     assert lint_increment(inc, existing, POOL) == []
+
+
+def test_lint_increment_rejects_forged_runtime_fields():
+    existing = _manifest(_node("a", status="done"))
+    forged = _node(
+        "fix-1", worker="bob", blocked_by=["a"],
+        status="done", work_item_id="forged", merged=True,
+    )
+
+    errs = lint_increment(_manifest(forged), existing, POOL)
+
+    assert any("runtime field" in error for error in errs)

@@ -105,7 +105,7 @@ nodes:
 | `title` / `description` | 简短说明；`description` 只放事实源锚点，不复制设计正文。 |
 | `worker` / `reviewer` | 两者都必填，必须来自实例 agent pool，且 reviewer 不得与 worker 相同。 |
 | `blocked_by` | 真实运行前置节点 id 列表；无前置时使用空列表。 |
-| `work_item_id` / `status` | 运行时回填的工作项和状态；authoring 时不要凭空伪造。 |
+| `status` / `work_item_id` / `merged` / `merged_at` | 仅由 OMAC 运行时回填；authoring manifest 中禁止出现这些字段，即使值看似为默认值也会拒绝。 |
 | `contract` | 节点唯一实施与评审合同。 |
 
 ### contract 全字段
@@ -131,6 +131,10 @@ nodes:
 `source_of_truth`、`covers`、`acceptance_refs`、`commands`。`required_metrics` 若出现必须是
 object，`artifacts` 若出现必须是列表。worker verification 和 reviewer report 必须复现 contract
 中的 gate 名称、命令、事实源与交付目标。
+
+authoring manifest 只声明任务和合同，不携带运行状态。`status`、`work_item_id`、`merged`、
+`merged_at` 由 dispatch、review 和 merge 流程根据平台权威事实写回；预填这些字段不能跳过派发、
+证据门、评审或合并。
 
 后续 worker 可能是低推理预算模型。每个 contract 必须独立可执行，不能依赖隐含上下文；
 边界条件、禁止范围、验证入口和集成结果都要显式写出。

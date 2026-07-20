@@ -94,7 +94,8 @@ def test_dag_run_rejects_missing_required_acceptance_file(
 def _mixed_manifest(tmp_path):
     """Manifest with nodes in various states; work_item_ids use 1,2,3 (mock order)."""
     return _manifest_yaml(tmp_path, [
-        {"id": "a", "worker": "alice", "status": "done", "work_item_id": "1"},
+        {"id": "a", "worker": "alice", "status": "done", "work_item_id": "1",
+         "merged": True, "merged_at": "2026-07-20T00:00:00Z"},
         {"id": "b", "worker": "bob", "status": "in_progress", "work_item_id": "2", "blocked_by": ["a"]},
         {"id": "c", "worker": "charlie", "status": "todo"},
         {"id": "d", "worker": "alice", "status": "blocked", "work_item_id": "3", "blocked_by": ["b"]},
@@ -108,7 +109,13 @@ def _populate_store(store):
     # item 1 — done with pr_url
     store.create_work_item("ws", "A", "d", dag_key="a", worker="alice")
     store.update_status("1", WorkItemStatus.DONE)
-    store.update_work_item_metadata("1", artifacts={"pr_url": "https://pr/1"})
+    store.update_work_item_metadata(
+        "1",
+        artifacts={"pr_url": "https://pr/1"},
+        verification={"quality": {"delivered_revision": "head-sha"}},
+        review_verdict="pass",
+        review_report={"reviewed_revision": "head-sha"},
+    )
 
     # item 2 — in_progress
     store.create_work_item("ws", "B", "d", dag_key="b", worker="bob")
@@ -182,8 +189,8 @@ class TestSchemaLock:
 class TestBuildStatusReport:
     """reconcile + 快照内容断言。"""
 
-    def test_reconcile_syncs_platform_status_to_manifest(self, tmp_path):
-        """manifest says todo, platform says done → manifest synced to done."""
+    def test_reconcile_does_not_trust_platform_done_without_delivery(self, tmp_path):
+        """Platform DONE alone cannot bypass evidence, review, and merge."""
         path = _manifest_yaml(tmp_path, [
             {"id": "a", "worker": "alice", "status": "todo", "work_item_id": "1"},
         ])
@@ -196,7 +203,7 @@ class TestBuildStatusReport:
         build_status_report(manifest, store, path)
 
         reloaded = load_manifest(path)
-        assert reloaded.nodes["a"].status == "done"
+        assert reloaded.nodes["a"].status == "todo"
 
     def test_reconcile_clears_missing_work_item_id(self, tmp_path):
         """work_item_id points to nonexistent item → cleared, status → todo."""
@@ -221,9 +228,9 @@ class TestBuildStatusReport:
 
         p = report["progress"]
         assert p["total"] == 6
-        assert p["done"] == 2      # a, e
+        assert p["done"] == 1      # a has authoritative merged delivery
         assert p["running"] == 1   # b (in_progress)
-        assert p["todo"] == 1      # c
+        assert p["todo"] == 2      # c plus forged done node e
         assert p["blocked"] == 1   # d
         assert p["abandoned"] == 1 # f
         assert p["failed"] == 0
@@ -231,11 +238,24 @@ class TestBuildStatusReport:
 
     def test_converged_when_all_done(self, tmp_path):
         path = _manifest_yaml(tmp_path, [
-            {"id": "a", "worker": "alice", "status": "done"},
-            {"id": "b", "worker": "bob", "status": "done", "blocked_by": ["a"]},
+            {"id": "a", "worker": "alice", "status": "done", "work_item_id": "1",
+             "merged": True},
+            {"id": "b", "worker": "bob", "status": "done", "work_item_id": "2",
+             "merged": True, "blocked_by": ["a"]},
         ])
         manifest = load_manifest(path)
         store = _mock_store()
+        for item_id, key, worker in (("1", "a", "alice"), ("2", "b", "bob")):
+            item = store.create_work_item("ws", key, "d", dag_key=key, worker=worker)
+            assert item.id == item_id
+            store.update_status(item_id, WorkItemStatus.DONE)
+            store.update_work_item_metadata(
+                item_id,
+                artifacts={"pr_url": f"https://pr/{item_id}"},
+                verification={"quality": {"delivered_revision": "head-sha"}},
+                review_verdict="pass",
+                review_report={"reviewed_revision": "head-sha"},
+            )
         report = build_status_report(manifest, store, path)
         assert report["progress"]["converged"] is True
         assert report["needs_decision"] is None
@@ -370,7 +390,8 @@ class TestDagStatusCLI:
         data = json.loads(out)
         assert set(data.keys()) == set(STATUS_REPORT_KEYS)
         assert data["progress"]["total"] == 2
-        assert data["progress"]["done"] == 1
+        assert data["progress"]["done"] == 0
+        assert data["progress"]["todo"] == 1
         assert data["progress"]["blocked"] == 1
         assert data["needs_decision"] is not None
 
@@ -421,7 +442,8 @@ class TestDagStatusCLI:
                       "--workspace", "ws", "--output", "json"])
         assert code == exit_codes.OK
         data = json.loads(capsys.readouterr().out)
-        assert data["progress"]["done"] == 1
+        assert data["progress"]["done"] == 0
+        assert data["progress"]["todo"] == 1
 
     def test_status_reads_config_next_to_absolute_manifest(self, tmp_path, monkeypatch, capsys):
         """从项目外执行 dag status /abs/project/.omac/m.yaml 也读项目配置。"""
@@ -443,7 +465,8 @@ class TestDagStatusCLI:
         assert main(["dag", "status", str(manifest_path), "--output", "json"]) == exit_codes.OK
 
         data = json.loads(capsys.readouterr().out)
-        assert data["progress"]["done"] == 1
+        assert data["progress"]["done"] == 0
+        assert data["progress"]["todo"] == 1
 
     def test_status_manifest_not_found(self, tmp_path, monkeypatch, capsys):
         monkeypatch.chdir(tmp_path)

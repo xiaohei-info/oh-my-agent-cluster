@@ -220,9 +220,11 @@ def save_manifest(manifest: Manifest, path: str):
             "id": n.id,
             "worker": n.worker,
             "blocked_by": list(n.blocked_by),
-            "work_item_id": n.work_item_id,
-            "status": n.status,
         }
+        if n.work_item_id is not None:
+            node["work_item_id"] = n.work_item_id
+        if n.status != "todo":
+            node["status"] = n.status
         if n.title is not None:
             node["title"] = n.title
         if n.description is not None:

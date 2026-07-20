@@ -73,9 +73,17 @@ class MulticaStore(WorkItemStore):
         return True
 
     def inspect_pull_request(self, pr_url: str) -> PullRequestSnapshot:
+        if not isinstance(pr_url, str) or not pr_url.strip():
+            raise ValidationError(ui(
+                "PR URL must be a non-empty string before GitHub inspection.",
+                "调用 GitHub 检查前，PR URL 必须是非空字符串。",
+            ))
         try:
             proc = subprocess.run(
-                ["gh", "pr", "view", pr_url, "--json", "isDraft,state,headRefOid"],
+                [
+                    "gh", "pr", "view", pr_url, "--json",
+                    "url,isDraft,state,headRefOid",
+                ],
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -108,8 +116,13 @@ class MulticaStore(WorkItemStore):
             raise ValidationError(ui(
                 f"GitHub PR check did not return headRefOid: {pr_url}",
                 f"GitHub PR 检查未返回 headRefOid: {pr_url}"))
+        canonical_url = payload.get("url")
+        if not isinstance(canonical_url, str) or not canonical_url.strip():
+            raise ValidationError(ui(
+                f"GitHub PR check did not return canonical URL: {pr_url}",
+                f"GitHub PR 检查未返回 canonical URL: {pr_url}"))
         return PullRequestSnapshot(
-            url=pr_url,
+            url=canonical_url,
             is_draft=payload.get("isDraft") is True,
             state=str(payload.get("state") or ""),
             head_revision=head_revision,

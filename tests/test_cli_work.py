@@ -738,8 +738,9 @@ class TestSubmitPerKindPhase:
         monkeypatch.setattr(
             eng.store,
             "inspect_pull_request",
-            lambda _url: SimpleNamespace(
-                is_draft=False, state="OPEN", head_revision="current-pr-head"),
+            lambda url: SimpleNamespace(
+                url=url, is_draft=False, state="OPEN",
+                head_revision="current-pr-head"),
             raising=False,
         )
         vfile = tmp_path / "verification.yaml"
@@ -774,8 +775,9 @@ class TestSubmitPerKindPhase:
         monkeypatch.setattr(
             eng.store,
             "inspect_pull_request",
-            lambda _url: SimpleNamespace(
-                is_draft=False, state="OPEN", head_revision="current-pr-head"),
+            lambda url: SimpleNamespace(
+                url=url, is_draft=False, state="OPEN",
+                head_revision="current-pr-head"),
             raising=False,
         )
         rfile = tmp_path / "review.yaml"
@@ -803,8 +805,8 @@ class TestSubmitPerKindPhase:
         monkeypatch.setattr(
             eng.store,
             "inspect_pull_request",
-            lambda _url: SimpleNamespace(
-                is_draft=False, state="OPEN", head_revision="head-sha"),
+            lambda url: SimpleNamespace(
+                url=url, is_draft=False, state="OPEN", head_revision="head-sha"),
             raising=False,
         )
         vfile = tmp_path / "verification.yaml"
@@ -829,8 +831,8 @@ class TestSubmitPerKindPhase:
         monkeypatch.setattr(
             eng.store,
             "inspect_pull_request",
-            lambda _url: SimpleNamespace(
-                is_draft=True, state="OPEN", head_revision="head-sha"),
+            lambda url: SimpleNamespace(
+                url=url, is_draft=True, state="OPEN", head_revision="head-sha"),
         )
 
         with pytest.raises(ValidationError) as exc:
@@ -860,8 +862,8 @@ class TestSubmitPerKindPhase:
         monkeypatch.setattr(
             eng.store,
             "inspect_pull_request",
-            lambda _url: SimpleNamespace(
-                is_draft=False, state="OPEN", head_revision="head-sha"),
+            lambda url: SimpleNamespace(
+                url=url, is_draft=False, state="OPEN", head_revision="head-sha"),
         )
 
         result = dispatch_mod.submit(
@@ -885,8 +887,8 @@ class TestSubmitPerKindPhase:
         monkeypatch.setattr(
             eng.store,
             "inspect_pull_request",
-            lambda _url: SimpleNamespace(
-                is_draft=False, state="OPEN", head_revision="head-sha"),
+            lambda url: SimpleNamespace(
+                url=url, is_draft=False, state="OPEN", head_revision="head-sha"),
         )
 
         result = dispatch_mod.submit(
@@ -1467,23 +1469,27 @@ class TestSubmitMissingCli:
 class TestSubmitLoopE2E:
     """验证 submit 左移校验与 loop 权威门 schema 同源,submit 过的证据,loop 必过。"""
 
-    def test_develop_submit_then_loop_harvests(self, tmp_path):
+    def test_develop_submit_then_loop_collects_results(self, tmp_path):
         eng = _engine(MOCK_AUTO_COMPLETE="false")
         store = eng.store
         contract = CONTRACT
         members = sorted(store.list_members("mock-workspace"))
         a_worker = members[0]
+        a_reviewer = members[1]
 
-        # 1. 建 manifest + 节点(无 reviewer → worker 完成后 loop 直接 done)
-        node_a = Node(id="a", worker=a_worker, contract=contract, title="a")
+        # 1. 建 manifest + 节点，强制独立 reviewer。
+        node_a = Node(
+            id="a", worker=a_worker, reviewer=a_reviewer,
+            contract=contract, title="a")
         manifest = Manifest(meta={"workspace_id": "mock-workspace"},
                             nodes={"a": node_a})
         mpath = str(tmp_path / "omac.yaml")
         save_manifest(manifest, mpath)
 
         # 2. 模拟 loop dispatch 派发 a:建 work item + 落 contract + 标 IN_PROGRESS
-        it_a = store.create_work_item("mock-workspace", "a", "d", dag_key="a",
-                                      worker=a_worker)
+        it_a = store.create_work_item(
+            "mock-workspace", "a", "d", dag_key="a",
+            worker=a_worker, reviewer=a_reviewer)
         store.set_node_contract(it_a.id, contract)
         store.assign_work_item(it_a.id, a_worker, "worker")
         store.update_status(it_a.id, WorkItemStatus.IN_PROGRESS)
@@ -1500,8 +1506,23 @@ class TestSubmitLoopE2E:
         assert result.advanced_to == WorkItemStatus.DONE
         assert store.get_work_item(it_a.id).status == WorkItemStatus.DONE
 
-        # 4. loop tick 收割:证据门必过 → 节点 done
-        result = tick(store, eng.runtime, manifest, mpath, max_parallel=4)
+        # 4. loop 先过 Worker 权威证据门并派发 Reviewer。
+        result = tick(
+            store, eng.runtime, manifest, mpath, max_parallel=4,
+            config={"engine": "mock"})
+        assert manifest.nodes["a"].status == "in_review"
+        assert "a" in result.running
+
+        # 5. Reviewer 提交完整 report；下一 tick 过 review 与 merge 门后 done。
+        rfile = tmp_path / "review.yaml"
+        rfile.write_text(yaml.safe_dump(_make_review_report()))
+        review_result = dispatch_mod.submit(
+            store, it_a.id, verdict="pass", report_file=str(rfile))
+        assert review_result.advanced_to == WorkItemStatus.IN_REVIEW
+
+        result = tick(
+            store, eng.runtime, manifest, mpath, max_parallel=4,
+            config={"engine": "mock"})
         assert manifest.nodes["a"].status == "done"
         assert "a" in result.done
         # schema 同源断言:权威的 validate_worker_evidence 对同一 verification 必须过
@@ -1570,3 +1591,164 @@ class TestPhaseResolution:
         assert got.deliverable is None
         assert got.status == WorkItemStatus.TODO
         assert got.phase == dispatch_mod.TaskPhase.AUTHORING
+
+
+def test_pass_with_nits_followup_cannot_replace_reviewed_pull_request(
+    tmp_path, monkeypatch,
+):
+    eng = _engine()
+    item = eng.store.create_work_item(
+        "mock-workspace", "t", "d", dag_key="a", worker="alice",
+        reviewer="bob", kind=TaskKind.DEVELOP,
+    )
+    eng.store.set_node_contract(item.id, CONTRACT)
+    eng.store.update_work_item_metadata(
+        item.id,
+        phase=TaskPhase.AUTHORING,
+        artifacts={"pr_url": "https://github.com/acme/project/pull/1"},
+        review_verdict="pass-with-nits",
+        review_report=_make_review_report(),
+    )
+    verification = _make_verification()
+    verification["quality"]["delivered_revision"] = "head-sha-nits"
+    verification["quality"]["regression_proof"][0]["head_ref"] = "head-sha-nits"
+    vfile = tmp_path / "verification.yaml"
+    vfile.write_text(yaml.safe_dump(verification))
+
+    def inspect(pr_url):
+        revision = "head-sha" if pr_url.endswith("/1") else "head-sha-nits"
+        return SimpleNamespace(
+            url=pr_url, is_draft=False, state="OPEN", head_revision=revision)
+
+    monkeypatch.setattr(eng.store, "inspect_pull_request", inspect)
+
+    with pytest.raises(ValidationError, match="same pull request"):
+        dispatch_mod.submit(
+            eng.store,
+            item.id,
+            pr_url="https://github.com/acme/project/pull/2",
+            verification_file=str(vfile),
+        )
+
+
+def test_followup_rejects_malformed_previous_pr_url_before_adapter(
+    tmp_path, monkeypatch,
+):
+    eng = _engine()
+    item = eng.store.create_work_item(
+        "mock-workspace", "t", "d", dag_key="a", worker="alice",
+        reviewer="bob", kind=TaskKind.DEVELOP,
+    )
+    eng.store.set_node_contract(item.id, CONTRACT)
+    eng.store.update_work_item_metadata(
+        item.id,
+        phase=TaskPhase.AUTHORING,
+        artifacts={"pr_url": {"bad": "url"}},
+        review_verdict="pass-with-nits",
+        review_report=_make_review_report(),
+    )
+    verification = _make_verification()
+    verification["quality"]["delivered_revision"] = "head-sha-nits"
+    verification["quality"]["regression_proof"][0]["head_ref"] = "head-sha-nits"
+    vfile = tmp_path / "verification.yaml"
+    vfile.write_text(yaml.safe_dump(verification))
+
+    calls = []
+
+    def inspect(pr_url):
+        calls.append(pr_url)
+        return SimpleNamespace(
+            url=pr_url, is_draft=False, state="OPEN",
+            head_revision="head-sha-nits",
+        )
+
+    monkeypatch.setattr(eng.store, "inspect_pull_request", inspect)
+
+    with pytest.raises(ValidationError, match="previous artifacts.pr_url"):
+        dispatch_mod.submit(
+            eng.store,
+            item.id,
+            pr_url="https://github.com/acme/project/pull/1",
+            verification_file=str(vfile),
+        )
+
+    assert calls == ["https://github.com/acme/project/pull/1"]
+
+
+def test_develop_review_requires_worker_delivered_revision(tmp_path, monkeypatch):
+    eng = _engine()
+    item = eng.store.create_work_item(
+        "mock-workspace", "t", "d", dag_key="a", worker="alice",
+        reviewer="bob", kind=TaskKind.DEVELOP,
+        initial_status=WorkItemStatus.IN_REVIEW,
+    )
+    item.phase = TaskPhase.REVIEW
+    eng.store.set_node_contract(item.id, CONTRACT)
+    verification = _make_verification()
+    del verification["quality"]["delivered_revision"]
+    eng.store.update_work_item_metadata(
+        item.id,
+        artifacts={"pr_url": "https://github.com/acme/project/pull/1"},
+        verification=verification,
+    )
+    monkeypatch.setattr(
+        eng.store,
+        "inspect_pull_request",
+        lambda pr_url: SimpleNamespace(
+            url=pr_url, is_draft=False, state="OPEN", head_revision="head-sha"),
+    )
+    rfile = tmp_path / "review.yaml"
+    rfile.write_text(yaml.safe_dump(_make_review_report()))
+
+    with pytest.raises(ValidationError, match="delivered_revision is required"):
+        dispatch_mod.submit(
+            eng.store, item.id, verdict="pass", report_file=str(rfile))
+
+
+def test_develop_authoring_rejects_blank_pr_url_before_adapter(tmp_path, monkeypatch):
+    eng = _engine()
+    item = eng.store.create_work_item(
+        "mock-workspace", "t", "d", dag_key="a", worker="alice",
+        reviewer="bob", kind=TaskKind.DEVELOP,
+    )
+    eng.store.set_node_contract(item.id, CONTRACT)
+    vfile = tmp_path / "verification.yaml"
+    vfile.write_text(yaml.safe_dump(_make_verification()))
+    monkeypatch.setattr(
+        eng.store,
+        "inspect_pull_request",
+        lambda _url: pytest.fail("adapter must not receive a blank PR URL"),
+    )
+
+    with pytest.raises(ValidationError, match="pr_url"):
+        dispatch_mod.submit(
+            eng.store, item.id, pr_url="", verification_file=str(vfile))
+
+
+def test_decompose_authoring_rejects_runtime_state_fields(tmp_path):
+    eng = _engine()
+    item = eng.store.create_work_item(
+        "mock-workspace", "t", "d", dag_key="a", worker="alice",
+        kind=TaskKind.DECOMPOSE,
+    )
+    manifest = Manifest(meta={}, nodes={
+        "runtime-forged": Node(
+            id="runtime-forged",
+            worker="alice",
+            reviewer="bob",
+            contract=CONTRACT,
+            status="done",
+            work_item_id="forged-item",
+            merged=True,
+        ),
+    })
+    mfile = tmp_path / "manifest.yaml"
+    save_manifest(manifest, str(mfile))
+
+    with pytest.raises(ValidationError, match="runtime field"):
+        dispatch_mod.submit(
+            eng.store,
+            item.id,
+            manifest_file=str(mfile),
+            agent_pool={"alice", "bob"},
+        )

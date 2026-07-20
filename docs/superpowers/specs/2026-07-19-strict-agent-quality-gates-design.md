@@ -24,6 +24,10 @@ The existing `pass-with-nits` control flow remains unchanged:
 - The Worker applies the requested follow-up and resubmits evidence.
 - The item continues to merge or completion without a second Reviewer round.
 
+The follow-up remains on the same canonical pull request. It must create a new
+head revision; replacing the reviewed PR with another repository or PR number
+is invalid.
+
 Because this path deliberately skips re-review, `pass-with-nits` may contain
 only low-risk, precisely scoped follow-up items. Any functional, correctness,
 contract, security, data-integrity, compatibility, or verification problem must
@@ -47,6 +51,12 @@ The stable identifier is `outcome.id`. Every executable requirement assigned to
 a node must be represented by exactly one required outcome. Outcomes may point
 to an acceptance flow/action or a design source reference, but prose alone is
 not sufficient for completion.
+
+Authored manifests contain declarations only. `status`, `work_item_id`,
+`merged`, and `merged_at` are runtime-owned fields and are rejected when present
+in authoring input, including apparently harmless default values. A resumed
+`done` node is trusted only when its platform work item and completed delivery
+evidence agree with the node identity.
 
 ### 2.1 Acceptance action identifiers
 
@@ -152,6 +162,9 @@ Validation rules:
 - `runtime_fallbacks` must be an empty list.
 - `known_gaps` must be an empty list.
 - `evidence_origin` must be `real`; simulated/mock evidence is rejected.
+- Rework submits the same platform-canonical PR identity as the previous
+  delivery; a URL alias may normalize, but another repository or PR number is
+  rejected.
 
 These checks prove traceability and red/green behavior. They do not treat a
 Worker's statement as authoritative proof. Reviewer reproduction remains the
@@ -219,6 +232,9 @@ Every finding has:
 - `changed_files` is non-empty for develop reviews.
 - Every review-scope boolean must be true.
 - `outcome_mapping` covers every contract outcome and records `pass` or `fail`.
+- Acceptance, outcome, and integration-gate mappings contain every expected key
+  exactly once. Duplicate keys, unknown keys, malformed keys, invalid statuses,
+  and missing keys are rejected rather than collapsed by dictionary conversion.
 - Reviewer independently reproduces every business-test red/green proof.
 - Reviewer checks changed production paths for fake/synthetic runtime fallback.
 - A report is one complete finding batch for `reviewed_revision`; the Reviewer
@@ -266,6 +282,18 @@ Because no Reviewer checks this follow-up, nits must not alter business logic,
 error semantics, data contracts, permissions, persistence, concurrency,
 integration behavior, migrations, or public interfaces.
 
+The follow-up uses the same canonical PR and a new head revision. If the
+original PR cannot continue, the item is blocked for an explicit decision; a
+replacement PR cannot inherit the previous review.
+
+### 5.3 Revision-locked merge
+
+Automatic merge requires both `{pr_url}` and `{reviewed_revision}` in the merge
+command template. The default GitHub command passes `--match-head-commit` with
+the reviewed revision. If the PR head changes after review, merge fails and
+returns through the existing bounded merge-rework path instead of merging an
+unreviewed commit.
+
 ## 6. Mock and Synthetic Data Boundary
 
 The `mock` engine remains available for tests of OMAC's orchestration, adapter,
@@ -305,6 +333,9 @@ Required production changes:
 - `core/lint.py`: strict quality validation.
 - `core/evidence.py`: Worker quality and Reviewer finding validators.
 - `pipeline/dispatch.py`: strict submit validation and review context.
+- `pipeline/loop.py`: reject preloaded runtime completion without authoritative
+  work-item and delivery facts.
+- `pipeline/delivery.py` and `core/config.py`: revision-locked merge templates.
 - `pipeline/tasks.py`: prohibit self-review fallback.
 - engine model/adapters: preserve and expose the new evidence fields.
 - mock engine: mark generated evidence as mock and generate schema-valid shapes
@@ -339,6 +370,8 @@ Tests are written and observed failing before implementation.
 - head failure is rejected;
 - runtime fallbacks and known gaps are rejected;
 - mock/simulated evidence origin is rejected.
+- blank or malformed PR URLs are rejected before an adapter call;
+- rework cannot replace the previously delivered canonical PR.
 
 ### Reviewer evidence tests
 
@@ -347,6 +380,10 @@ Tests are written and observed failing before implementation.
 - free-form blocker/nit strings are rejected;
 - findings and blocker/nit ID lists must agree;
 - outcome coverage must be complete;
+- duplicate, unknown, malformed, invalid-status, and missing mapping entries are
+  all rejected;
+- develop review requires Worker `delivered_revision` even when the current PR
+  head is known;
 - `pass`, `pass-with-nits`, and `reject` enforce their exact finding rules;
 - one complete reject batch is visible to the Worker on rework.
 
@@ -356,6 +393,10 @@ Tests are written and observed failing before implementation.
 - reject still returns to Worker and then Reviewer;
 - `pass-with-nits` still returns to Worker once and skips second review;
 - strict evidence failures do not mutate metadata or status;
+- preloaded `done`, `work_item_id`, `merged`, or `merged_at` authoring state
+  cannot bypass dispatch, review, or merge;
+- merge commands without both safety placeholders are blocked, and the default
+  command is locked to the reviewed head;
 - mock orchestration tests use explicit schema-valid mock evidence without
   weakening production validation.
 

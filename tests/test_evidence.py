@@ -142,6 +142,20 @@ def test_worker_evidence_passes():
     assert validate_worker_evidence(NODE, item) == []
 
 
+def test_worker_evidence_malformed_contract_gate_name_does_not_crash():
+    contract = deepcopy(CONTRACT)
+    contract.integration_gates[0]["name"] = ["bad"]
+    node = Node(id="bad-gate", worker="alice", contract=contract)
+    item = Item(
+        artifacts={"pr_url": "https://x/pr/1"},
+        verification=_good_verification(),
+    )
+
+    errors = validate_worker_evidence(node, item)
+
+    assert any("gate name" in error for error in errors)
+
+
 def test_worker_evidence_requires_pr():
     item = Item(artifacts={}, verification=_good_verification())
     assert any("pr_url" in e for e in validate_worker_evidence(NODE, item))
@@ -439,6 +453,37 @@ def test_review_evidence_requires_reviewed_revision():
     assert any("reviewed_revision is required" in e for e in errs)
 
 
+def test_review_evidence_malformed_contract_acceptance_does_not_crash():
+    contract = deepcopy(CONTRACT)
+    contract.acceptance = [["bad"]]
+    node = Node(id="bad-acceptance", worker="alice", contract=contract)
+    item = Item(
+        verification=_good_verification(),
+        review_verdict="pass",
+        review_report=_good_report(),
+    )
+
+    errors = validate_review_evidence(node, item, expected_revision="head-sha")
+
+    assert any("contract acceptance" in error for error in errors)
+
+
+def test_review_evidence_reports_all_mapping_sections_in_one_pass():
+    report = _good_report()
+    report["acceptance_mapping"] = []
+    report["integration_gate_mapping"] = []
+    item = Item(
+        verification=_good_verification(),
+        review_verdict="pass",
+        review_report=report,
+    )
+
+    errors = validate_review_evidence(NODE, item, expected_revision="head-sha")
+
+    assert any("acceptance_mapping must be non-empty" in error for error in errors)
+    assert any("integration_gate_mapping must be non-empty" in error for error in errors)
+
+
 def test_review_evidence_revision_must_match_worker_delivery():
     report = _good_report()
     report["reviewed_revision"] = "stale-head"
@@ -467,6 +512,91 @@ def test_review_evidence_revision_must_match_current_pr_head():
     )
 
     assert any("reviewed_revision must match current PR head" in error for error in errs)
+
+
+def test_review_evidence_requires_worker_revision_when_current_head_is_checked():
+    verification = _good_verification()
+    del verification["quality"]["delivered_revision"]
+
+    errs = validate_review_evidence(
+        NODE,
+        Item(
+            review_verdict="pass",
+            review_report=_good_report(),
+            verification=verification,
+        ),
+        expected_revision="head-sha",
+    )
+
+    assert any("Worker delivered_revision is required" in error for error in errs)
+
+
+def test_review_evidence_rejects_conflicting_duplicate_acceptance_mapping():
+    report = _good_report()
+    report["acceptance_mapping"] = [
+        {"acceptance": "works", "status": "fail"},
+        {"acceptance": "works", "status": "pass"},
+    ]
+
+    errs = validate_review_evidence(
+        NODE,
+        Item(
+            review_verdict="pass", review_report=report,
+            verification=_good_verification(),
+        ),
+    )
+
+    assert any("duplicate acceptance mapping: works" in error for error in errs)
+    assert any("acceptance_mapping[0].status is invalid" in error for error in errs)
+
+
+def test_review_evidence_rejects_unknown_acceptance_mapping():
+    report = _good_report()
+    report["acceptance_mapping"].append(
+        {"acceptance": "unknown", "status": "pass"})
+
+    errs = validate_review_evidence(
+        NODE,
+        Item(
+            review_verdict="pass", review_report=report,
+            verification=_good_verification(),
+        ),
+    )
+
+    assert any("unknown acceptance mapping: unknown" in error for error in errs)
+
+
+def test_review_evidence_rejects_duplicate_integration_gate_mapping():
+    report = _good_report()
+    report["integration_gate_mapping"].append(
+        deepcopy(report["integration_gate_mapping"][0]))
+
+    errs = validate_review_evidence(
+        NODE,
+        Item(
+            review_verdict="pass", review_report=report,
+            verification=_good_verification(),
+        ),
+    )
+
+    assert any("duplicate integration gate mapping: gate-1" in error for error in errs)
+
+
+def test_review_evidence_rejects_malformed_contract_gate_name_without_crashing():
+    contract = deepcopy(CONTRACT)
+    contract.integration_gates[0]["name"] = ["gate-1"]
+    node = Node(id="malformed", worker="alice", contract=contract)
+
+    errs = validate_review_evidence(
+        node,
+        Item(
+            review_verdict="pass",
+            review_report=_good_report(),
+            verification=_good_verification(),
+        ),
+    )
+
+    assert any("contract integration gate name must be a non-empty string" in error for error in errs)
 
 
 def test_review_evidence_requires_complete_review_scope():

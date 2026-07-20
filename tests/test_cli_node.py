@@ -311,7 +311,9 @@ def test_accept_marks_done_and_updates_platform_status(tmp_path, capsys, monkeyp
     m = load_manifest(path)
     assert payload["status"] == "done"
     assert m.nodes["b"].status == "done"
-    assert engine.store.get_work_item(item.id).status == WorkItemStatus.DONE
+    accepted = engine.store.get_work_item(item.id)
+    assert accepted.status == WorkItemStatus.DONE
+    assert accepted.decision_required == {"action": "accepted"}
 
 
 def test_retry_reassign_worker_validated_against_config(tmp_path, capsys, monkeypatch):

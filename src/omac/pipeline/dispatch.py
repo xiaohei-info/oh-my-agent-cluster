@@ -17,7 +17,11 @@ import yaml
 
 from omac.core import evidence as evidence_mod
 from omac.core.acceptance import load_acceptance_doc, load_acceptance_doc_file
-from omac.core.lint import lint as lint_manifest, lint_increment
+from omac.core.lint import (
+    authoring_runtime_field_errors,
+    lint as lint_manifest,
+    lint_increment,
+)
 from omac.core.manifest import _load_contract, load_manifest
 from omac.core.project_rules import END_MARKER, START_MARKER
 from omac.core.taskmeta import TaskKind, TaskPhase
@@ -533,6 +537,30 @@ def _validate_decompose_authoring(
     except (ValueError, OSError) as exc:
         raise ValidationError(ui(
             f"Could not parse manifest: {exc}", f"manifest 解析失败: {exc}"))
+    try:
+        raw_manifest = yaml.safe_load(content)
+    except yaml.YAMLError as exc:
+        raise ValidationError(ui(
+            f"Could not parse manifest: {exc}", f"manifest 解析失败: {exc}"))
+    runtime_fields = {"status", "work_item_id", "merged", "merged_at"}
+    raw_runtime_errors = []
+    if isinstance(raw_manifest, dict):
+        raw_nodes = raw_manifest.get("nodes")
+        if isinstance(raw_nodes, list):
+            for index, raw_node in enumerate(raw_nodes):
+                if not isinstance(raw_node, dict):
+                    continue
+                for field in sorted(runtime_fields & set(raw_node)):
+                    raw_runtime_errors.append(
+                        f"nodes[{index}]: runtime field {field} is forbidden in authoring")
+    runtime_errors = raw_runtime_errors or authoring_runtime_field_errors(manifest)
+    if runtime_errors:
+        raise ValidationError(ui(
+            "Manifest authoring contains runtime fields:\n  - "
+            + "\n  - ".join(runtime_errors),
+            "manifest authoring 包含禁止的运行时字段:\n  - "
+            + "\n  - ".join(runtime_errors),
+        ))
     if base_manifest is not None:
         errors = lint_increment(manifest, base_manifest, pool)
     else:
@@ -549,6 +577,34 @@ def _validate_develop_authoring(
 ) -> Dict[str, Any]:
     """develop × authoring 左移校验:复用 P2.2 validate_worker_evidence。"""
     snapshot = inspect_ready_pull_request(store, pr_url)
+    previous_artifacts = getattr(item, "artifacts", None)
+    previous_pr_url = (
+        previous_artifacts.get("pr_url")
+        if isinstance(previous_artifacts, dict) else None
+    )
+    if isinstance(previous_artifacts, dict) and "pr_url" in previous_artifacts:
+        if not isinstance(previous_pr_url, str) or not previous_pr_url.strip():
+            raise ValidationError(ui(
+                "previous artifacts.pr_url must be a non-empty string before rework. "
+                "Repair the stored delivery metadata instead of replacing the PR.",
+                "返工前 previous artifacts.pr_url 必须是非空字符串。"
+                "请修复已存交付元数据，不得替换 PR。",
+            ))
+        previous_snapshot = store.inspect_pull_request(previous_pr_url)
+        if not isinstance(previous_snapshot.url, str) or not previous_snapshot.url.strip():
+            raise ValidationError(ui(
+                "The platform did not return a canonical URL for the previous PR.",
+                "平台未返回 previous PR 的 canonical URL。",
+            ))
+        previous_canonical_url = previous_snapshot.url.rstrip("/")
+        current_canonical_url = snapshot.url.rstrip("/")
+        if previous_canonical_url != current_canonical_url:
+            raise ValidationError(ui(
+                "Worker follow-up must use the same pull request reviewed previously. "
+                f"Expected {previous_snapshot.url}, got {snapshot.url}.",
+                "Worker 返工必须继续使用 Reviewer 已评审的同一个 pull request。"
+                f"期望 {previous_snapshot.url}，实际 {snapshot.url}。",
+            ))
     verification = _parse_structured(verification_file)
     node = _Node(_contract_from_item(item))
     probe = _Item(
@@ -568,7 +624,24 @@ def _validate_develop_authoring(
 
 def inspect_ready_pull_request(store: WorkItemStore, pr_url: str):
     """通过 engine adapter 读取 PR 权威状态，pipeline 不直接调用平台 CLI。"""
+    if not isinstance(pr_url, str) or not pr_url.strip():
+        raise ValidationError(ui(
+            "artifacts.pr_url must be a non-empty string. "
+            "Resubmit with `--pr-url <url>`.",
+            "artifacts.pr_url 必须是非空字符串。"
+            "请使用 `--pr-url <url>` 重新提交。",
+        ))
     snapshot = store.inspect_pull_request(pr_url)
+    if not isinstance(snapshot.url, str) or not snapshot.url.strip():
+        raise ValidationError(ui(
+            "The platform did not return a canonical PR URL.",
+            "平台未返回 canonical PR URL。",
+        ))
+    if not isinstance(snapshot.head_revision, str) or not snapshot.head_revision.strip():
+        raise ValidationError(ui(
+            "The platform did not return a non-empty PR head revision.",
+            "平台未返回非空 PR head revision。",
+        ))
     if snapshot.is_draft:
         raise ValidationError(ui(
             f"GitHub PR is still a draft and cannot enter CI/review/merge: {pr_url}\n"

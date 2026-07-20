@@ -230,6 +230,15 @@ def test_integration_gate_rejects_non_string_command_without_crashing():
     assert any("commands must be non-empty strings" in error for error in errs)
 
 
+def test_integration_gate_rejects_non_string_name_without_crashing():
+    contract = _valid_contract()
+    contract.integration_gates[0]["name"] = ["gate-1"]
+
+    errs = lint(_manifest(_node("a", reviewer="bob", contract=contract)), POOL)
+
+    assert any("name must be a non-empty string" in error for error in errs)
+
+
 def test_quality_rejects_non_string_outcome_ref_without_crashing():
     contract = _valid_contract()
     contract.quality.business_tests[0]["outcome_refs"] = [{"id": "outcome-x"}]

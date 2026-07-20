@@ -226,10 +226,10 @@ def run_merge_delivery(
 ) -> str:
     """reviewer pass 后、进 done 之前的自动 merge 门(§7.3)。
 
-    - 未配置 merge → 默认执行 ``gh pr merge {pr_url} --squash --delete-branch``。
+    - 未配置 merge → 默认执行带 ``--match-head-commit {reviewed_revision}`` 的 GitHub merge。
     - 配置了 merge 但节点无 pr_url → 防御性 blocked + 报错即教学,返回 ``'blocked'``。
-    - 配置了 merge → 进入 ``merging``(manifest 细分态,平台仍 in_review),执行
-      ``merge.command``:
+    - 配置了 merge → command 必须同时包含 ``{pr_url}`` 和
+      ``{reviewed_revision}``;进入 ``merging``(manifest 细分态,平台仍 in_review),执行:
         * 成功 → 回到 ``in_progress`` 语义即「已合入」;manifest ``Node`` 记录
           ``merged: true`` / ``merged_at``;返回 ``'pass'``(loop 随即 ``done``)。
         * 冲突/失败 → 失败摘要(命令输出尾部) add_comment + reset_review + 转回
@@ -261,11 +261,48 @@ def run_merge_delivery(
         store.update_status(item_id, WorkItemStatus.BLOCKED)
         return "blocked"
 
+    review_report = item.review_report if isinstance(item.review_report, dict) else {}
+    reviewed_revision = review_report.get("reviewed_revision")
+    if not isinstance(reviewed_revision, str) or not reviewed_revision.strip():
+        store.add_comment(item_id, ui(
+            "⚠️ Merge is blocked because review_report.reviewed_revision is missing. "
+            "Submit a complete review report bound to the PR head.",
+            "⚠️ merge 已阻断：review_report.reviewed_revision 缺失。"
+            "请提交绑定当前 PR head 的完整评审报告。",
+        ))
+        node.status = "blocked"
+        store.update_status(item_id, WorkItemStatus.BLOCKED)
+        return "blocked"
+
+    command_template = merge.get("command") if isinstance(merge, dict) else None
+    required_placeholders = ("{pr_url}", "{reviewed_revision}")
+    missing_placeholders = [
+        placeholder for placeholder in required_placeholders
+        if not isinstance(command_template, str)
+        or placeholder not in command_template
+    ]
+    if missing_placeholders:
+        store.add_comment(item_id, ui(
+            "⚠️ Merge command is unsafe because it is missing placeholders: "
+            + ", ".join(missing_placeholders)
+            + ". Configure merge.command with both {pr_url} and {reviewed_revision}.",
+            "⚠️ merge command 缺少安全占位符："
+            + "、".join(missing_placeholders)
+            + "。请同时配置 {pr_url} 和 {reviewed_revision}。",
+        ))
+        node.status = "blocked"
+        store.update_status(item_id, WorkItemStatus.BLOCKED)
+        return "blocked"
+
     # 进入 merging(manifest 细分态;平台仍 in_review)
     node.status = "merging"
     store.update_status(item_id, to_platform_status("merging"))
 
-    command = merge["command"].replace("{pr_url}", pr_url)
+    command = (
+        command_template
+        .replace("{pr_url}", pr_url)
+        .replace("{reviewed_revision}", reviewed_revision.strip())
+    )
     timeout = max(1, int(merge.get("timeout_minutes", 30))) * 60
     try:
         proc = subprocess.run(

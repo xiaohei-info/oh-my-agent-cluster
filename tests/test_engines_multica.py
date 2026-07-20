@@ -764,6 +764,7 @@ def test_inspect_pull_request_returns_current_head_revision(monkeypatch):
     class Result:
         returncode = 0
         stdout = json.dumps({
+            "url": "https://github.com/acme/project/pull/7",
             "isDraft": False,
             "state": "OPEN",
             "headRefOid": "abc123",
@@ -778,3 +779,16 @@ def test_inspect_pull_request_returns_current_head_revision(monkeypatch):
     assert snapshot.is_draft is False
     assert snapshot.state == "OPEN"
     assert snapshot.head_revision == "abc123"
+    assert snapshot.url == "https://github.com/acme/project/pull/7"
+
+
+@pytest.mark.parametrize("pr_url", [None, "", "   ", {"url": "x"}])
+def test_inspect_pull_request_rejects_invalid_url_before_subprocess(monkeypatch, pr_url):
+    store = MulticaStore(EngineConfig(engine_type="multica", workspace_id="ws"))
+    monkeypatch.setattr(
+        "omac.engines.multica.subprocess.run",
+        lambda *a, **k: pytest.fail("subprocess must not receive an invalid PR URL"),
+    )
+
+    with pytest.raises(Exception, match="PR URL"):
+        store.inspect_pull_request(pr_url)

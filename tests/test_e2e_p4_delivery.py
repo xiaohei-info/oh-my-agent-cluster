@@ -383,7 +383,10 @@ class TestMergeChain:
                     cwd=tmp_path, env=env).returncode == 0
         assert _run(["config", "set", "ci.check_command",
                      f"sh {ci} {{pr_url}}"], cwd=tmp_path, env=env).returncode == 0
-        assert _run(["config", "set", "merge.command", f"sh {merge} {{pr_url}}"],
+        assert _run([
+            "config", "set", "merge.command",
+            f"sh {merge} {{pr_url}} {{reviewed_revision}}",
+        ],
                     cwd=tmp_path, env=env).returncode == 0
         m = tmp_path / ".omac" / "smoke-full.yaml"
         r = _run(["dag", "run", str(m), "--output", "json"], cwd=tmp_path, env=env)

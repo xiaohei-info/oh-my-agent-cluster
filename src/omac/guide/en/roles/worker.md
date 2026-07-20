@@ -63,6 +63,8 @@ conflicts; do not redefine the contract.
     regression `head_ref` matches it; include outcome mappings, base-fail/head-pass
     proof, empty `runtime_fallbacks` and `known_gaps`, and `evidence_origin: real`.
 11. Submit the original PR URL and verification file using the returned command.
+    The platform-resolved canonical repository and PR number must match the
+    first delivery; URL aliases may normalize, but another PR is forbidden.
 
 ## Completion conditions
 
@@ -79,11 +81,11 @@ conflicts; do not redefine the contract.
 ## Rework
 
 Re-run `work show`, read `previous_review`, and keep using the original branch
-and PR. Reproduce blockers with a failing test or command, make the smallest
-fix, create a new commit, rerun the full contract verification against the new
-PR head, update verification, and submit again.
-Create a replacement PR only when the original is closed, its base cannot be
-repaired, or you lack push permission; explain the replacement in that PR.
+and the same canonical PR. Reproduce blockers with a failing test or command,
+make the smallest fix, create a new commit, rerun the full contract verification
+against the new PR head, update verification, and submit again. If the original
+PR is closed, its base cannot be repaired, or push permission is missing, report
+a blocker and request repair of that PR; do not substitute another PR.
 
 ## Block and escalate
 

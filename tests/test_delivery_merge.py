@@ -7,7 +7,7 @@ config.retry.merge + reset_review)门,本模块补 reviewer pass 后的自动 me
                                         │
                                         └ 冲突/失败 ──► 有界转回 worker
                                                        (merge_bounce+1,
-                                                        ≥ 上界 → blocked)
+                                                        无剩余返工次数 → blocked)
 
 覆盖(对 harvest 顺序 §7.3 in_review reviewer pass → merging → done):
   - 配置 merge:假 merge 脚本 exit 0 → pass → done + manifest 记录 merged: true / 时间;
@@ -34,9 +34,15 @@ from omac.core.config import (
 )
 from omac.core.manifest import Manifest, Node
 from omac.engines.mock import MockRuntime, MockStore
-from omac.engines.models import EngineConfig, WorkItem, WorkItemStatus
-from omac.errors import ValidationError
-from omac.pipeline.delivery import run_merge_delivery
+from omac.engines.models import (
+    DeliveryCommandOutcome,
+    DeliveryCommandResult,
+    EngineConfig,
+    WorkItem,
+    WorkItemStatus,
+)
+from omac.errors import AuthError, PlatformError, ValidationError
+from omac.pipeline.delivery import advance_delivery, run_merge_delivery
 from omac.pipeline import loop
 
 
@@ -66,6 +72,20 @@ def _merge_script(tmp_path, body, name="merge.sh"):
 def _merge_config(script_path, timeout_minutes=30):
     return {"merge": {"command": f"sh {script_path} {{pr_url}} {{delivered_revision}}",
                       "timeout_minutes": timeout_minutes}}
+
+
+def _command_result(
+    outcome: DeliveryCommandOutcome,
+    *,
+    exit_code: int | None = None,
+    output: str = "",
+) -> DeliveryCommandResult:
+    return DeliveryCommandResult(
+        outcome=outcome,
+        exit_code=exit_code,
+        output=output,
+        summary=output or "(no output)",
+    )
 
 
 # 一个「reviewer-pass 后」的节点:reviewer pass 的证据已落盘(pr_url + review_verdict + review_report),
@@ -137,25 +157,25 @@ class TestRunMergeDeliveryUnit:
 
         seen = {}
 
-        def fake_run(command, **kwargs):
-            seen["command"] = command
-            seen["kwargs"] = kwargs
+        def merge_pull_request(pr_url, delivered_revision, command, timeout_minutes):
+            seen.update({
+                "pr_url": pr_url,
+                "delivered_revision": delivered_revision,
+                "command": command,
+                "timeout_minutes": timeout_minutes,
+            })
+            return _command_result(DeliveryCommandOutcome.PASSED, exit_code=0)
 
-            class Proc:
-                returncode = 0
-                stdout = "merged"
-                stderr = ""
-
-            return Proc()
-
-        monkeypatch.setattr("omac.pipeline.delivery.subprocess.run", fake_run)
+        monkeypatch.setattr(store, "merge_pull_request", merge_pull_request)
 
         assert run_merge_delivery({}, manifest, "a", store, _runtime(store),
                                   dict(DEFAULT_RETRY)) == "pass"
-        assert seen["command"] == (
-            "gh pr merge https://github.com/acme/project/pull/1 --squash --delete-branch "
-            "--match-head-commit delivered-sha")
-        assert seen["kwargs"]["shell"] is True
+        assert seen == {
+            "pr_url": "https://github.com/acme/project/pull/1",
+            "delivered_revision": "delivered-sha",
+            "command": DEFAULT_GITHUB_MERGE_COMMAND,
+            "timeout_minutes": 30,
+        }
         assert manifest.nodes["a"].merged is True
         # 无任何评论 / 成功后节点语义回到 in_progress(即将 done)
         assert store.get_comments(item.id) == []
@@ -169,24 +189,20 @@ class TestRunMergeDeliveryUnit:
         manifest.nodes["a"].status = "in_review"
         seen = {}
 
-        def fake_run(command, **kwargs):
+        def merge_pull_request(pr_url, delivered_revision, command, timeout_minutes):
             seen["command"] = command
+            seen["delivered_revision"] = delivered_revision
+            return _command_result(DeliveryCommandOutcome.PASSED, exit_code=0)
 
-            class Proc:
-                returncode = 0
-                stdout = "merged"
-                stderr = ""
-
-            return Proc()
-
-        monkeypatch.setattr("omac.pipeline.delivery.subprocess.run", fake_run)
+        monkeypatch.setattr(store, "merge_pull_request", merge_pull_request)
         script = _merge_script(tmp_path, "exit 0")
 
         assert run_merge_delivery(
             _merge_config(script), manifest, "a", store, _runtime(store),
             dict(DEFAULT_RETRY),
         ) == "pass"
-        assert "delivered-sha" in seen["command"]
+        assert "{delivered_revision}" in seen["command"]
+        assert seen["delivered_revision"] == "delivered-sha"
 
     def test_pass_with_nits_merges_fresh_worker_revision(self, monkeypatch):
         store = _store()
@@ -202,22 +218,18 @@ class TestRunMergeDeliveryUnit:
         manifest.nodes["a"].status = "in_review"
         seen = {}
 
-        def fake_run(command, **kwargs):
+        def merge_pull_request(pr_url, delivered_revision, command, timeout_minutes):
+            seen["delivered_revision"] = delivered_revision
             seen["command"] = command
+            return _command_result(DeliveryCommandOutcome.PASSED, exit_code=0)
 
-            class Proc:
-                returncode = 0
-                stdout = "merged"
-                stderr = ""
-
-            return Proc()
-
-        monkeypatch.setattr("omac.pipeline.delivery.subprocess.run", fake_run)
+        monkeypatch.setattr(store, "merge_pull_request", merge_pull_request)
 
         assert run_merge_delivery(
             {}, manifest, "a", store, _runtime(store), dict(DEFAULT_RETRY),
         ) == "pass"
-        assert "--match-head-commit followup-sha" in seen["command"]
+        assert "--match-head-commit {delivered_revision}" in seen["command"]
+        assert seen["delivered_revision"] == "followup-sha"
 
     def test_custom_merge_command_without_revision_placeholder_is_validation_error(
         self, tmp_path, monkeypatch,
@@ -229,7 +241,8 @@ class TestRunMergeDeliveryUnit:
         manifest.nodes["a"].status = "in_review"
         script = _merge_script(tmp_path, "exit 0")
         monkeypatch.setattr(
-            "omac.pipeline.delivery.subprocess.run",
+            store,
+            "merge_pull_request",
             lambda *a, **k: pytest.fail(
                 "unsafe merge command must not be executed"),
         )
@@ -253,15 +266,12 @@ class TestRunMergeDeliveryUnit:
         manifest.nodes["a"].work_item_id = item.id
         manifest.nodes["a"].status = "in_review"
 
-        def fake_run(command, **kwargs):  # noqa: ARG001
-            class Proc:
-                returncode = 0
-                stdout = "merged"
-                stderr = ""
-
-            return Proc()
-
-        monkeypatch.setattr("omac.pipeline.delivery.subprocess.run", fake_run)
+        monkeypatch.setattr(
+            store,
+            "merge_pull_request",
+            lambda *a, **k: _command_result(
+                DeliveryCommandOutcome.PASSED, exit_code=0),
+        )
 
         assert run_merge_delivery(
             {"merge": {"timeout_minutes": 30}}, manifest, "a", store,
@@ -326,6 +336,10 @@ class TestRunMergeDeliveryUnit:
                         {"acceptance": "a works", "evidence": "ok", "status": "pass"}],
                     "blockers": []})
             result = run_merge_delivery(cfg, manifest, "a", store, _runtime(store), limits)
+            assert result == "bounce"
+        manifest.nodes["a"].status = "in_review"
+        store.update_status(item.id, WorkItemStatus.DONE)
+        result = run_merge_delivery(cfg, manifest, "a", store, _runtime(store), limits)
         assert result == "blocked"
         assert manifest.nodes["a"].status == "blocked"
         assert store.get_work_item(item.id).bounces.merge == DEFAULT_RETRY["merge"]
@@ -349,7 +363,7 @@ class TestRunMergeDeliveryUnit:
         manifest.nodes["a"].work_item_id = item.id
         script = _merge_script(tmp_path, "exit 1")
         limits = resolve_retry({"retry": {"merge": 5}})
-        for i in range(5):
+        for i in range(6):
             manifest.nodes["a"].status = "in_review"
             store.update_status(item.id, WorkItemStatus.DONE)
             store.update_work_item_metadata(
@@ -364,7 +378,7 @@ class TestRunMergeDeliveryUnit:
                     "blockers": []})
             res = run_merge_delivery(_merge_config(script), manifest, "a", store,
                                      _runtime(store), limits)
-            if i < 4:
+            if i < 5:
                 assert res == "bounce"
             else:
                 assert res == "blocked"
@@ -388,6 +402,187 @@ class TestRunMergeDeliveryUnit:
         assert any("omac work submit" in c for c in comments)
 
 
+class TestAdapterDeliveryExecution:
+    def test_merge_executes_through_store_adapter(self, monkeypatch):
+        store = _store()
+        item = _review_passed_item(store)
+        manifest = Manifest(meta={}, nodes={"a": _node()})
+        manifest.nodes["a"].work_item_id = item.id
+        manifest.nodes["a"].status = "in_review"
+        seen = {}
+
+        def merge_pull_request(pr_url, delivered_revision, command, timeout_minutes):
+            seen.update({
+                "pr_url": pr_url,
+                "delivered_revision": delivered_revision,
+                "command": command,
+                "timeout_minutes": timeout_minutes,
+            })
+            return _command_result(DeliveryCommandOutcome.PASSED, exit_code=0)
+
+        monkeypatch.setattr(store, "merge_pull_request", merge_pull_request)
+
+        assert run_merge_delivery(
+            {}, manifest, "a", store, _runtime(store), dict(DEFAULT_RETRY)
+        ) == "pass"
+        assert seen == {
+            "pr_url": "https://github.com/acme/project/pull/1",
+            "delivered_revision": "delivered-sha",
+            "command": DEFAULT_MOCK_MERGE_COMMAND,
+            "timeout_minutes": 30,
+        }
+
+    @pytest.mark.parametrize("error", [
+        AuthError("not logged in"),
+        PlatformError("network unavailable"),
+    ])
+    def test_merge_adapter_errors_propagate_without_consuming_retry(
+        self, monkeypatch, error,
+    ):
+        store = _store()
+        item = _review_passed_item(store)
+        manifest = Manifest(meta={}, nodes={"a": _node()})
+        manifest.nodes["a"].work_item_id = item.id
+        manifest.nodes["a"].status = "in_review"
+        monkeypatch.setattr(
+            store,
+            "merge_pull_request",
+            lambda *args, **kwargs: (_ for _ in ()).throw(error),
+        )
+
+        with pytest.raises(type(error), match=str(error)):
+            run_merge_delivery(
+                {}, manifest, "a", store, _runtime(store), dict(DEFAULT_RETRY)
+            )
+
+        assert store.get_work_item(item.id).bounces.merge == 0
+        assert manifest.nodes["a"].status == "in_review"
+
+    def test_merge_timeout_is_platform_error_without_consuming_retry(self, monkeypatch):
+        store = _store()
+        item = _review_passed_item(store)
+        manifest = Manifest(meta={}, nodes={"a": _node()})
+        manifest.nodes["a"].work_item_id = item.id
+        manifest.nodes["a"].status = "in_review"
+        monkeypatch.setattr(
+            store,
+            "merge_pull_request",
+            lambda *args, **kwargs: _command_result(
+                DeliveryCommandOutcome.TIMED_OUT, output="still merging"),
+        )
+
+        with pytest.raises(PlatformError, match="timed out"):
+            run_merge_delivery(
+                {}, manifest, "a", store, _runtime(store), dict(DEFAULT_RETRY)
+            )
+
+        assert store.get_work_item(item.id).bounces.merge == 0
+        assert manifest.nodes["a"].status == "in_review"
+
+    def test_merge_retry_one_allows_one_worker_rework(self, monkeypatch):
+        store = _store()
+        item = _review_passed_item(store)
+        manifest = Manifest(meta={}, nodes={"a": _node()})
+        manifest.nodes["a"].work_item_id = item.id
+        manifest.nodes["a"].status = "in_review"
+        monkeypatch.setattr(
+            store,
+            "merge_pull_request",
+            lambda *args, **kwargs: _command_result(
+                DeliveryCommandOutcome.FAILED, exit_code=1, output="conflict"),
+        )
+
+        limits = {**DEFAULT_RETRY, "merge": 1}
+        assert run_merge_delivery(
+            {}, manifest, "a", store, _runtime(store), limits
+        ) == "bounce"
+        assert store.get_work_item(item.id).bounces.merge == 1
+
+        manifest.nodes["a"].status = "in_review"
+        store.update_status(item.id, WorkItemStatus.DONE)
+        assert run_merge_delivery(
+            {}, manifest, "a", store, _runtime(store), limits
+        ) == "blocked"
+        assert store.get_work_item(item.id).bounces.merge == 1
+
+    def test_merge_wake_failure_rolls_back_retry_and_blocks(self, monkeypatch):
+        store = _store()
+        item = _review_passed_item(store)
+        manifest = Manifest(meta={}, nodes={"a": _node()})
+        manifest.nodes["a"].work_item_id = item.id
+        manifest.nodes["a"].status = "in_review"
+        monkeypatch.setattr(
+            store,
+            "merge_pull_request",
+            lambda *args, **kwargs: _command_result(
+                DeliveryCommandOutcome.FAILED, exit_code=1, output="conflict"),
+        )
+
+        class FailingRuntime:
+            def wake(self, item_id, agent, role):
+                raise PlatformError("runtime unavailable")
+
+        assert run_merge_delivery(
+            {}, manifest, "a", store, FailingRuntime(), dict(DEFAULT_RETRY)
+        ) == "blocked"
+        assert manifest.nodes["a"].status == "blocked"
+        assert store.get_work_item(item.id).status is WorkItemStatus.BLOCKED
+        assert store.get_work_item(item.id).bounces.merge == 0
+        assert any(
+            "runtime unavailable" in comment
+            for comment in store.get_comments(item.id)
+        )
+
+    def test_ci_timeout_does_not_consume_retry(self, monkeypatch):
+        store = _store()
+        item = _review_passed_item(store)
+        manifest = Manifest(meta={}, nodes={"a": _node()})
+        manifest.nodes["a"].work_item_id = item.id
+        manifest.nodes["a"].status = "in_progress"
+        monkeypatch.setattr(
+            store,
+            "run_ci_check",
+            lambda *args, **kwargs: _command_result(
+                DeliveryCommandOutcome.TIMED_OUT, output="checks pending"),
+        )
+
+        config = {"ci": {"check_command": "gh pr checks {pr_url}", "timeout_minutes": 1}}
+        with pytest.raises(PlatformError, match="timed out"):
+            advance_delivery(
+                config, manifest, "a", store, _runtime(store), dict(DEFAULT_RETRY)
+            )
+
+        assert store.get_work_item(item.id).bounces.ci == 0
+        assert manifest.nodes["a"].status == "in_progress"
+
+    def test_ci_retry_one_allows_one_worker_rework(self, monkeypatch):
+        store = _store()
+        item = _review_passed_item(store)
+        manifest = Manifest(meta={}, nodes={"a": _node()})
+        manifest.nodes["a"].work_item_id = item.id
+        manifest.nodes["a"].status = "in_progress"
+        monkeypatch.setattr(
+            store,
+            "run_ci_check",
+            lambda *args, **kwargs: _command_result(
+                DeliveryCommandOutcome.FAILED, exit_code=1, output="tests failed"),
+        )
+
+        config = {"ci": {"check_command": "pytest", "timeout_minutes": 1}}
+        limits = {**DEFAULT_RETRY, "ci": 1}
+        assert advance_delivery(
+            config, manifest, "a", store, _runtime(store), limits
+        ) == "bounce"
+        assert store.get_work_item(item.id).bounces.ci == 1
+
+        manifest.nodes["a"].status = "in_progress"
+        store.update_status(item.id, WorkItemStatus.DONE)
+        assert advance_delivery(
+            config, manifest, "a", store, _runtime(store), limits
+        ) == "blocked"
+        assert store.get_work_item(item.id).bounces.ci == 1
+
+
 # ── 经真实 collect_results 的 e2e ──────────────────────────────────────────
 
 class TestCollectResultsMerge:
@@ -406,15 +601,12 @@ class TestCollectResultsMerge:
         import omac.core.manifest as mmod
         mmod.save_manifest(manifest, path)
 
-        def fake_run(command, **kwargs):  # noqa: ARG001
-            class Proc:
-                returncode = 0
-                stdout = "merged"
-                stderr = ""
-
-            return Proc()
-
-        monkeypatch.setattr("omac.pipeline.delivery.subprocess.run", fake_run)
+        monkeypatch.setattr(
+            store,
+            "merge_pull_request",
+            lambda *a, **k: _command_result(
+                DeliveryCommandOutcome.PASSED, exit_code=0),
+        )
 
         loop.collect_results(store, rt, manifest, path, retry_limits=dict(DEFAULT_RETRY),
                             config={})
@@ -594,7 +786,7 @@ class TestCollectResultsMerge:
         mmod.save_manifest(manifest, path)
         script = _merge_script(tmp_path, "exit 1")
         cfg = _merge_config(script)
-        for _ in range(DEFAULT_RETRY["merge"]):
+        for _ in range(DEFAULT_RETRY["merge"] + 1):
             store.update_work_item_metadata(
                 item.id, review_verdict="pass",
                 review_report={

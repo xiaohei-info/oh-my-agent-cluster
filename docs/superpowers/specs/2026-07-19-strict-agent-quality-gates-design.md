@@ -308,6 +308,12 @@ Merge configuration is validated before node-state mutation. Missing
 `{pr_url}` or `{delivered_revision}` is validation failure (exit 5), not a
 caller-decision state. GitHub authentication failures use exit 3; platform,
 network, CLI availability, timeout, and malformed platform responses use exit 2.
+The pipeline never executes GitHub commands directly: it calls the
+`WorkItemStore` CI/merge operations, and the active engine adapter owns command
+execution and platform error classification. Auth, network, CLI-availability,
+and timeout failures do not consume Worker retry budget; only an actual CI or
+merge failure may return to the Worker. A retry limit of `1` permits one Worker
+rework and blocks on the next failure.
 
 ## 6. Mock and Synthetic Data Boundary
 
@@ -350,9 +356,11 @@ Required production changes:
 - `pipeline/dispatch.py`: strict submit validation and review context.
 - `pipeline/loop.py`: reject preloaded runtime completion without authoritative
   work-item and delivery facts.
-- `pipeline/delivery.py` and `core/config.py`: revision-locked merge templates.
+- `pipeline/delivery.py` and `core/config.py`: revision-locked delivery state
+  transitions and merge templates, without direct platform command execution.
 - `pipeline/tasks.py`: prohibit self-review fallback.
-- engine model/adapters: preserve and expose the new evidence fields.
+- engine model/adapters: preserve and expose the new evidence fields, inspect
+  authoritative PR state, and execute/classify CI and merge operations.
 - mock engine: mark generated evidence as mock and generate schema-valid shapes
   only for tests that explicitly exercise mock behavior.
 - Worker, Reviewer, Orchestrator, Planner guides and English equivalents.

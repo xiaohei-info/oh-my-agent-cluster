@@ -19,17 +19,21 @@ import pytest
 
 from omac.core.manifest import Manifest, Node
 from omac.core.config import DEFAULT_RETRY
-from omac.engines.models import EngineConfig, WorkItemStatus
+from omac.engines.models import (
+    DeliveryCommandOutcome,
+    DeliveryCommandResult,
+    EngineConfig,
+    WorkItemStatus,
+)
 from omac.engines.mock import MockRuntime, MockStore
 from omac.pipeline.delivery import (
     MANIFEST_TO_PLATFORM_STATUS,
     VALID_MANIFEST_STATUSES,
-    CIResult,
     advance_delivery,
-    run_ci_check,
     to_platform_status,
 )
 from omac.pipeline import loop
+from omac.errors import PlatformError
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────
@@ -154,22 +158,29 @@ class TestAdvanceDeliveryUnit:
         assert any("CI check failed" in c for c in comments)
         assert any("boom" in c for c in comments)
 
-    def test_ci_timeout_bounces_worker(self, tmp_path, monkeypatch):
-        import omac.pipeline.delivery as delivery
-        import subprocess as sp
-
-        def fake_run(cmd, **kw):
-            raise sp.TimeoutExpired(cmd=cmd, timeout=kw.get("timeout"),
-                                    output=b"still running", stderr=b"")
-        monkeypatch.setattr(delivery.subprocess, "run", fake_run)
+    def test_ci_timeout_surfaces_platform_error_without_worker_bounce(
+        self, tmp_path, monkeypatch,
+    ):
         store = _store()
+        monkeypatch.setattr(
+            store,
+            "run_ci_check",
+            lambda *args, **kwargs: DeliveryCommandResult(
+                outcome=DeliveryCommandOutcome.TIMED_OUT,
+                exit_code=None,
+                output="still running",
+                summary="still running",
+            ),
+        )
         item = _worker_done_item(store)
         manifest = Manifest(meta={}, nodes={"a": _node()})
         manifest.nodes["a"].work_item_id = item.id
         cfg = _ci_config(_ci_script(tmp_path, "exit 0"))
-        assert advance_delivery(cfg, manifest, "a", store, _runtime(store), dict(DEFAULT_RETRY)) == "bounce"
-        assert store.get_work_item(item.id).bounces.ci == 1
-        assert any("CI check timed out" in c for c in store.get_comments(item.id))
+        with pytest.raises(PlatformError, match="timed out"):
+            advance_delivery(
+                cfg, manifest, "a", store, _runtime(store), dict(DEFAULT_RETRY))
+        assert store.get_work_item(item.id).bounces.ci == 0
+        assert manifest.nodes["a"].status == "in_progress"
 
     def test_ci_bounce_reaches_cap_blocks(self, tmp_path):
         store = _store()
@@ -179,8 +190,8 @@ class TestAdvanceDeliveryUnit:
         script = _ci_script(tmp_path, 'echo fail; exit 1')
         cfg = _ci_config(script)
         limits = dict(DEFAULT_RETRY)
-        # 连续 3 次失败,第 3 次到顶 → blocked
-        for _ in range(DEFAULT_RETRY["ci"]):
+        # retry.ci=3 表示允许 3 次 Worker 返工，第 4 次失败才 blocked。
+        for _ in range(DEFAULT_RETRY["ci"] + 1):
             manifest.nodes["a"].status = "in_progress"
             store.update_work_item_metadata(item.id, artifacts={"pr_url": "https://example.com/pr/1"})
             store.update_status(item.id, WorkItemStatus.DONE)
@@ -207,12 +218,12 @@ class TestAdvanceDeliveryUnit:
         manifest.nodes["a"].work_item_id = item.id
         script = _ci_script(tmp_path, "exit 1")
         limits = {"ci": 5, "review": 3, "merge": 3}
-        for i in range(5):
+        for i in range(6):
             manifest.nodes["a"].status = "in_progress"
             store.update_work_item_metadata(item.id, artifacts={"pr_url": "https://example.com/pr/1"})
             store.update_status(item.id, WorkItemStatus.DONE)
             res = advance_delivery(_ci_config(script), manifest, "a", store, _runtime(store), limits)
-            if i < 4:
+            if i < 5:
                 assert res == "bounce"
             else:
                 assert res == "blocked"
@@ -233,44 +244,48 @@ class TestAdvanceDeliveryUnit:
         assert any("omac work submit" in c for c in comments)
 
 
-# ── run_ci_check 直接测试 ───────────────────────────────────────────────────
+# ── MockStore CI adapter 直接测试 ──────────────────────────────────────────
 
-class TestRunCiCheck:
+class TestMockStoreCiAdapter:
     def test_pass_exit_0(self, tmp_path):
+        store = _store()
         script = _ci_script(tmp_path, 'echo ok; exit 0')
-        res = run_ci_check(f"sh {script} {{pr_url}}", "https://x")
+        res = store.run_ci_check("https://x", f"sh {script} {{pr_url}}", 30)
         assert res.passed is True and res.timed_out is False and res.exit_code == 0
 
     def test_fail_exit_1(self, tmp_path):
+        store = _store()
         script = _ci_script(tmp_path, 'echo bad; exit 1')
-        res = run_ci_check(f"sh {script} {{pr_url}}", "https://x")
+        res = store.run_ci_check("https://x", f"sh {script} {{pr_url}}", 30)
         assert res.passed is False and res.timed_out is False and res.exit_code == 1
         assert "bad" in res.summary
 
     def test_fail_tail_output(self, tmp_path):
+        store = _store()
         script = _ci_script(tmp_path, "exit 2")
-        res = run_ci_check(f"sh {script} {{pr_url}}", "https://x")
-        assert "exit code 2" in res.label
+        res = store.run_ci_check("https://x", f"sh {script} {{pr_url}}", 30)
+        assert res.outcome is DeliveryCommandOutcome.FAILED
+        assert res.exit_code == 2
 
     def test_timeout_branch(self, tmp_path, monkeypatch):
-        import omac.pipeline.delivery as delivery
+        import omac.engines.mock as mock_engine
         import subprocess as sp
         def fake_run(cmd, **kw):
             raise sp.TimeoutExpired(cmd=cmd, timeout=kw.get("timeout"),
                                     output=b"partial", stderr=b"")
-        monkeypatch.setattr(delivery.subprocess, "run", fake_run)
-        res = run_ci_check("gh pr checks {pr_url}", "https://x")
+        monkeypatch.setattr(mock_engine.subprocess, "run", fake_run)
+        res = _store().run_ci_check("https://x", "gh pr checks {pr_url}", 30)
         assert res.timed_out is True and res.passed is False and res.exit_code is None
-        assert "CI check timed out" in res.label
+        assert res.summary == "partial"
 
     def test_timeout_str_decode_branch(self, tmp_path, monkeypatch):
-        import omac.pipeline.delivery as delivery
+        import omac.engines.mock as mock_engine
         import subprocess as sp
         def fake_run(cmd, **kw):
             raise sp.TimeoutExpired(cmd=cmd, timeout=kw.get("timeout"),
                                     output="out-str", stderr="err-str")
-        monkeypatch.setattr(delivery.subprocess, "run", fake_run)
-        res = run_ci_check("gh pr checks {pr_url}", "https://x")
+        monkeypatch.setattr(mock_engine.subprocess, "run", fake_run)
+        res = _store().run_ci_check("https://x", "gh pr checks {pr_url}", 30)
         assert res.timed_out is True and "out-str" in res.output
 
 
@@ -308,14 +323,19 @@ class TestCollectResultsCi:
         (workflows / "ci.yml").write_text("name: ci\n", encoding="utf-8")
         seen = {}
 
-        def fake_ci(command, pr_url, timeout_minutes=30):
+        def fake_ci(pr_url, command, timeout_minutes=30):
             seen["command"] = command
             seen["pr_url"] = pr_url
             seen["timeout_minutes"] = timeout_minutes
-            return CIResult(True, False, 0, "ok", "ok")
+            return DeliveryCommandResult(
+                outcome=DeliveryCommandOutcome.PASSED,
+                exit_code=0,
+                output="ok",
+                summary="ok",
+            )
 
-        monkeypatch.setattr("omac.pipeline.delivery.run_ci_check", fake_ci)
         store = _store()
+        monkeypatch.setattr(store, "run_ci_check", fake_ci)
         rt = _runtime(store)
         manifest, item = self._advance_to_worker_done(store)
         path = str(tmp_path / ".omac" / "m.yaml")
@@ -398,7 +418,7 @@ class TestCollectResultsCi:
         script = _ci_script(tmp_path, "exit 1")
         cfg = _ci_config(script)
         fails_all = None
-        for _ in range(DEFAULT_RETRY["ci"]):
+        for _ in range(DEFAULT_RETRY["ci"] + 1):
             store.update_work_item_metadata(item.id, artifacts={"pr_url": "https://example.com/pr/1"})
             store.update_status(item.id, WorkItemStatus.DONE)
             manifest.nodes["a"].status = "in_progress"

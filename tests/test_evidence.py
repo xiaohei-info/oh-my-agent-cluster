@@ -142,6 +142,25 @@ def test_worker_evidence_passes():
     assert validate_worker_evidence(NODE, item) == []
 
 
+def test_worker_evidence_rejects_duplicate_contract_integration_gate_names():
+    contract = deepcopy(CONTRACT)
+    contract.integration_gates.append(deepcopy(contract.integration_gates[0]))
+    node = Node(id="duplicate-worker-gate", worker="alice", contract=contract)
+
+    errors = validate_worker_evidence(
+        node,
+        Item(
+            artifacts={"pr_url": "https://x/pr/1"},
+            verification=_good_verification(),
+        ),
+    )
+
+    assert any(
+        "duplicate integration gate name: gate-1" in error
+        for error in errors
+    )
+
+
 def test_worker_evidence_rejects_duplicate_integration_gate_results():
     verification = _good_verification()
     failed = deepcopy(verification["integration_gates"][0])
@@ -458,6 +477,28 @@ def test_review_evidence_passes_with_goals():
     assert validate_review_evidence(
         NODE, Item(review_verdict="pass", review_report=_good_report())
     ) == []
+
+
+def test_review_evidence_rejects_duplicate_contract_integration_gate_names():
+    contract = deepcopy(CONTRACT)
+    contract.integration_gates.append(deepcopy(contract.integration_gates[0]))
+    node = Node(id="duplicate-review-gate", worker="alice", contract=contract)
+    report = _good_report()
+    report["integration_gate_mapping"] = []
+
+    errors = validate_review_evidence(
+        node,
+        Item(
+            verification=_good_verification(),
+            review_verdict="pass",
+            review_report=report,
+        ),
+    )
+
+    assert any(
+        "duplicate integration gate name: gate-1" in error
+        for error in errors
+    )
 
 
 def test_review_evidence_review_goals_required():

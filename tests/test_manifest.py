@@ -140,6 +140,51 @@ def test_quality_contract_rejects_malformed_shape(raw_quality, message):
         _load_contract({"quality": raw_quality})
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("source_of_truth", "docs/design.md"),
+        ("required_contracts", "docs/shared.md"),
+        ("acceptance", "flow-x"),
+        ("non_goals", "none"),
+        ("verification_commands", "pytest -q"),
+        ("integration_gates", {"name": "gate-1"}),
+        ("scope_paths", "src/**"),
+    ],
+)
+def test_contract_list_fields_reject_non_list_raw_values(field, value):
+    from omac.core.manifest import _load_contract
+
+    with pytest.raises(ValueError, match=rf"contract\.{field} must be a list"):
+        _load_contract({field: value})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("objective", []),
+        ("pr_base", 42),
+    ],
+)
+def test_contract_scalar_fields_reject_non_string_raw_values(field, value):
+    from omac.core.manifest import _load_contract
+
+    with pytest.raises(
+        ValueError, match=rf"contract\.{field} must be a string"
+    ):
+        _load_contract({field: value})
+
+
+def test_load_manifest_records_dot_omac_project_root(tmp_path):
+    project_root = tmp_path / "project"
+    manifest_dir = project_root / ".omac"
+    manifest_dir.mkdir(parents=True)
+
+    manifest = load_manifest(_write(manifest_dir, "meta: {}\nnodes: []\n"))
+
+    assert manifest.project_root == str(project_root.resolve())
+
+
 def test_env_expansion(tmp_path, monkeypatch):
     content = "meta:\n  ws: \"${OMAC_TEST_WS:-fallback}\"\nnodes: []\n"
     path = _write(tmp_path, content)

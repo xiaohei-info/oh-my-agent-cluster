@@ -19,6 +19,41 @@ class WorkItemStatus(Enum):
     BLOCKED = "blocked"
 
 
+class DeliveryCommandOutcome(Enum):
+    """CI / merge adapter 的业务结果；平台类错误继续通过异常传播。"""
+
+    PASSED = "passed"
+    FAILED = "failed"
+    TIMED_OUT = "timed_out"
+
+
+@dataclass(frozen=True)
+class DeliveryCommandResult:
+    """adapter 执行 CI / merge 命令后的结构化结果。
+
+    ``FAILED`` 只表达真实命令失败，可消耗 retry；认证、网络、平台错误必须
+    抛 ``AuthError`` / ``PlatformError``，``TIMED_OUT`` 由 pipeline 转平台错误，
+    均不得伪装成 Worker 可修复失败。
+    """
+
+    outcome: DeliveryCommandOutcome
+    exit_code: Optional[int]
+    output: str
+    summary: str
+
+    @property
+    def passed(self) -> bool:
+        return self.outcome is DeliveryCommandOutcome.PASSED
+
+    @property
+    def failed(self) -> bool:
+        return self.outcome is DeliveryCommandOutcome.FAILED
+
+    @property
+    def timed_out(self) -> bool:
+        return self.outcome is DeliveryCommandOutcome.TIMED_OUT
+
+
 @dataclass
 class WorkspaceInfo:
     """工作空间信息"""

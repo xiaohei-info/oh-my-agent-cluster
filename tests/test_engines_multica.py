@@ -4,8 +4,11 @@ import subprocess
 
 import pytest
 
-from omac.engines.models import EngineConfig
-from omac.engines.models import WorkItemStatus
+from omac.engines.models import (
+    DeliveryCommandOutcome,
+    EngineConfig,
+    WorkItemStatus,
+)
 from omac.engines.multica import MulticaStore
 from omac.errors import AuthError, PlatformError, ValidationError
 
@@ -839,3 +842,125 @@ def test_inspect_pull_request_maps_timeout_to_exit_2(monkeypatch):
 
     with pytest.raises(PlatformError):
         store.inspect_pull_request("https://github.com/acme/project/pull/7")
+
+
+def test_inspect_pull_request_maps_gh_returncode_4_to_auth_error(monkeypatch):
+    store = MulticaStore(EngineConfig(engine_type="multica", workspace_id="ws"))
+
+    class Result:
+        returncode = 4
+        stdout = ""
+        stderr = "authentication required"
+
+    monkeypatch.setattr("omac.engines.multica.subprocess.run", lambda *a, **k: Result())
+
+    with pytest.raises(AuthError):
+        store.inspect_pull_request("https://github.com/acme/project/pull/7")
+
+
+def test_inspect_pull_request_rejects_non_object_json(monkeypatch):
+    store = MulticaStore(EngineConfig(engine_type="multica", workspace_id="ws"))
+
+    class Result:
+        returncode = 0
+        stdout = "[]"
+        stderr = ""
+
+    monkeypatch.setattr("omac.engines.multica.subprocess.run", lambda *a, **k: Result())
+
+    with pytest.raises(PlatformError, match="JSON object"):
+        store.inspect_pull_request("https://github.com/acme/project/pull/7")
+
+
+def test_multica_ci_returncode_4_is_auth_error(monkeypatch):
+    store = MulticaStore(EngineConfig(engine_type="multica", workspace_id="ws"))
+
+    class Result:
+        returncode = 4
+        stdout = ""
+        stderr = "authentication required"
+
+    monkeypatch.setattr("omac.engines.multica.subprocess.run", lambda *a, **k: Result())
+
+    with pytest.raises(AuthError):
+        store.run_ci_check(
+            "https://github.com/acme/project/pull/7",
+            "gh pr checks {pr_url} --watch --fail-fast",
+            30,
+        )
+
+
+def test_multica_ci_network_failure_is_platform_error(monkeypatch):
+    store = MulticaStore(EngineConfig(engine_type="multica", workspace_id="ws"))
+
+    class Result:
+        returncode = 1
+        stdout = ""
+        stderr = "network unavailable"
+
+    monkeypatch.setattr("omac.engines.multica.subprocess.run", lambda *a, **k: Result())
+
+    with pytest.raises(PlatformError, match="network unavailable"):
+        store.run_ci_check(
+            "https://github.com/acme/project/pull/7",
+            "gh pr checks {pr_url} --watch --fail-fast",
+            30,
+        )
+
+
+def test_multica_ci_timeout_is_distinct_result(monkeypatch):
+    store = MulticaStore(EngineConfig(engine_type="multica", workspace_id="ws"))
+    monkeypatch.setattr(
+        "omac.engines.multica.subprocess.run",
+        lambda *a, **k: (_ for _ in ()).throw(
+            subprocess.TimeoutExpired("gh", 30, output=b"pending")
+        ),
+    )
+
+    result = store.run_ci_check(
+        "https://github.com/acme/project/pull/7",
+        "gh pr checks {pr_url} --watch --fail-fast",
+        30,
+    )
+
+    assert result.outcome is DeliveryCommandOutcome.TIMED_OUT
+    assert result.exit_code is None
+    assert "pending" in result.output
+
+
+def test_multica_merge_command_failure_is_not_platform_error(monkeypatch):
+    store = MulticaStore(EngineConfig(engine_type="multica", workspace_id="ws"))
+
+    class Result:
+        returncode = 1
+        stdout = ""
+        stderr = "merge conflict"
+
+    monkeypatch.setattr("omac.engines.multica.subprocess.run", lambda *a, **k: Result())
+
+    result = store.merge_pull_request(
+        "https://github.com/acme/project/pull/7",
+        "abc123",
+        "gh pr merge {pr_url} --match-head-commit {delivered_revision}",
+        30,
+    )
+
+    assert result.outcome is DeliveryCommandOutcome.FAILED
+    assert result.exit_code == 1
+    assert "merge conflict" in result.output
+
+
+def test_multica_runtime_wake_propagates_platform_error(monkeypatch):
+    from omac.engines.multica import MulticaRuntime
+
+    store = MulticaStore(EngineConfig(engine_type="multica", workspace_id="ws"))
+    monkeypatch.setattr(
+        store,
+        "_run_multica",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            PlatformError("runs endpoint unavailable")
+        ),
+    )
+
+    with pytest.raises(PlatformError, match="runs endpoint unavailable"):
+        MulticaRuntime(store).wake("issue-1", "alice", "worker")

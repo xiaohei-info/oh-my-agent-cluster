@@ -13,7 +13,7 @@ import pytest
 from omac.cli import exit_codes
 from omac.cli.commands.dag import _assemble_engine
 from omac.cli.commands import dag as dag_mod
-from omac.cli.main import main
+from omac.cli.main import build_parser, main
 from omac.engines import create_engine
 from omac.engines.models import EngineConfig, WorkItemStatus
 from omac.engines.mock import MockStore, MockRuntime
@@ -119,6 +119,43 @@ def test_dag_tick_uses_effective_engine_override_for_delivery_config(
     assert code == exit_codes.IN_PROGRESS
     assert captured["config"]["engine"] == "multica"
     capsys.readouterr()
+
+
+@pytest.mark.parametrize("action", ["check", "run", "status", "tick"])
+def test_dag_multica_override_accepts_project_for_engine_assembly(
+    action, tmp_path, monkeypatch,
+):
+    path = _manifest_yaml(tmp_path, [])
+    monkeypatch.chdir(tmp_path)
+    args = build_parser().parse_args([
+        "dag", action, path,
+        "--engine", "multica",
+        "--workspace", "ws-override",
+        "--project", "project-override",
+    ])
+
+    _, engine_config = _assemble_engine(args)
+
+    assert engine_config.engine_type == "multica"
+    assert engine_config.workspace_id == "ws-override"
+    assert engine_config.project_id == "project-override"
+
+
+def test_dag_check_maps_malformed_contract_type_to_validation_exit(
+    tmp_path, monkeypatch, capsys,
+):
+    path = _manifest_yaml(tmp_path, [{
+        "id": "a",
+        "worker": "alice",
+        "reviewer": "bob",
+        "contract": {"source_of_truth": "README.md"},
+    }])
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OMAC_ENGINE", "mock")
+    monkeypatch.setenv("OMAC_WORKSPACE_ID", "mock-workspace")
+
+    assert main(["dag", "check", path, "--no-review"]) == exit_codes.VALIDATION
+    assert "contract.source_of_truth must be a list" in capsys.readouterr().err
 
 
 def _mixed_manifest(tmp_path):

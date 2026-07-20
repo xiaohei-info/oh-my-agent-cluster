@@ -42,7 +42,7 @@ def _default_gh_merge_succeeds_in_loop_tests(monkeypatch):
             return Proc()
         return real_run(command, *args, **kwargs)
 
-    monkeypatch.setattr("omac.pipeline.delivery.subprocess.run", fake_run)
+    monkeypatch.setattr("omac.engines.mock.subprocess.run", fake_run)
 
 
 def _config(**extra):
@@ -1009,6 +1009,110 @@ class TestEvidenceGateRegression:
         assert result.state == "needs_decision"
         assert "a" in result.failed
         assert manifest.nodes["a"].status == "blocked"
+
+    def test_duplicate_gate_names_block_before_worker_evidence(
+        self, monkeypatch,
+    ):
+        contract = _contract()
+        contract.integration_gates.append(dict(contract.integration_gates[0]))
+        manifest = _manifest([_node("a", contract=contract)])
+        path = _tmp_manifest_path(manifest)
+        eng = _engine(MOCK_AUTO_COMPLETE="false")
+        item = self._manual_done_item(
+            eng,
+            "a",
+            contract=contract,
+            artifacts={"pr_url": "https://x/pr/1"},
+            verification=_verification(),
+        )
+        manifest.nodes["a"].work_item_id = item.id
+        manifest.nodes["a"].status = "in_progress"
+        save_manifest(manifest, path)
+
+        def must_not_validate_worker_evidence(*args, **kwargs):
+            raise AssertionError("worker evidence ran before contract validation")
+
+        monkeypatch.setattr(
+            "omac.pipeline.loop.validate_worker_evidence",
+            must_not_validate_worker_evidence,
+        )
+
+        result = tick(eng.store, eng.runtime, manifest, path)
+
+        assert result.state == "needs_decision"
+        assert manifest.nodes["a"].status == "blocked"
+        assert any(
+            "duplicate integration gate name" in comment
+            for comment in eng.store.get_comments(item.id)
+        )
+
+    def test_duplicate_gate_names_block_before_reviewer_evidence(
+        self, monkeypatch,
+    ):
+        contract = _contract()
+        contract.integration_gates.append(dict(contract.integration_gates[0]))
+        manifest = _manifest([_node("a", contract=contract)])
+        path = _tmp_manifest_path(manifest)
+        eng = _engine(MOCK_AUTO_COMPLETE="false")
+        item = self._manual_done_item(
+            eng,
+            "a",
+            contract=contract,
+            artifacts={"pr_url": "https://x/pr/1"},
+            verification=_verification(),
+        )
+        eng.store.update_work_item_metadata(
+            item.id,
+            phase=TaskPhase.REVIEW,
+            review_verdict="pass",
+            review_report=_review_report(),
+        )
+        eng.store.update_status(item.id, WorkItemStatus.IN_REVIEW)
+        manifest.nodes["a"].work_item_id = item.id
+        manifest.nodes["a"].status = "in_review"
+        save_manifest(manifest, path)
+
+        def must_not_validate_review_evidence(*args, **kwargs):
+            raise AssertionError("reviewer evidence ran before contract validation")
+
+        monkeypatch.setattr(
+            "omac.pipeline.loop.validate_review_evidence",
+            must_not_validate_review_evidence,
+        )
+
+        result = tick(eng.store, eng.runtime, manifest, path)
+
+        assert result.state == "needs_decision"
+        assert manifest.nodes["a"].status == "blocked"
+        assert any(
+            "duplicate integration gate name" in comment
+            for comment in eng.store.get_comments(item.id)
+        )
+
+    def test_required_contracts_use_manifest_project_root_at_runtime(
+        self, tmp_path, monkeypatch,
+    ):
+        project_root = tmp_path / "project"
+        manifest_dir = project_root / ".omac"
+        manifest_dir.mkdir(parents=True)
+        required_contract = project_root / "contracts" / "shared.md"
+        required_contract.parent.mkdir()
+        required_contract.write_text("# shared contract\n")
+        unrelated_cwd = tmp_path / "elsewhere"
+        unrelated_cwd.mkdir()
+        monkeypatch.chdir(unrelated_cwd)
+
+        contract = _contract()
+        contract.required_contracts = ["contracts/shared.md"]
+        manifest = _manifest([_node("a", contract=contract)])
+        path = str(manifest_dir / "manifest.yaml")
+        save_manifest(manifest, path)
+        eng = _engine(MOCK_AUTO_COMPLETE="false")
+
+        result = tick(eng.store, eng.runtime, manifest, path)
+
+        assert result.state == "running"
+        assert manifest.nodes["a"].status == "in_progress"
 
 
 # ==================== AITEAM-354:reviewer reject 有界回退受 retry.review 控制 ====================

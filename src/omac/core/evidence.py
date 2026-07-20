@@ -72,6 +72,32 @@ def _gate_by_name(gates, *, expected_names: set[str], prefix: str):
     return result, errors
 
 
+def _contract_integration_gates(contract):
+    errors = []
+    gates = getattr(contract, "integration_gates", None)
+    if not isinstance(gates, list):
+        return [], set(), ["contract.integration_gates must be a list"]
+
+    valid_gates = []
+    gate_names = set()
+    for gate in gates:
+        if not isinstance(gate, dict):
+            errors.append("contract integration gate must be an object")
+            continue
+        gate_name = gate.get("name")
+        if not isinstance(gate_name, str) or not gate_name.strip():
+            errors.append(
+                "contract integration gate name must be a non-empty string")
+            continue
+        if gate_name in gate_names:
+            errors.append(
+                f"contract duplicate integration gate name: {gate_name}")
+            continue
+        gate_names.add(gate_name)
+        valid_gates.append(gate)
+    return valid_gates, gate_names, errors
+
+
 def _metric_satisfies(actual, expected) -> bool:
     if isinstance(expected, bool):
         return actual is expected
@@ -490,22 +516,10 @@ def validate_worker_evidence(
             )
         )
 
-    expected_gates = contract.integration_gates
-    if not isinstance(expected_gates, list):
-        errors.append("contract.integration_gates must be a list")
-        expected_gates = []
-    valid_expected_gates = []
-    expected_gate_names = set()
-    for expected_gate in expected_gates:
-        if not isinstance(expected_gate, dict):
-            errors.append("contract integration gate must be an object")
-            continue
-        gate_name = expected_gate.get("name")
-        if not isinstance(gate_name, str) or not gate_name.strip():
-            errors.append("contract integration gate name must be a non-empty string")
-            continue
-        expected_gate_names.add(gate_name)
-        valid_expected_gates.append(expected_gate)
+    valid_expected_gates, expected_gate_names, contract_gate_errors = (
+        _contract_integration_gates(contract)
+    )
+    errors.extend(contract_gate_errors)
     integration_gate_by_name, gate_errors = _gate_by_name(
         verification.get("integration_gates"),
         expected_names=expected_gate_names,
@@ -587,6 +601,11 @@ def validate_review_evidence(
     if contract is None:
         return []
 
+    expected_gates, expected_gate_names, contract_gate_errors = (
+        _contract_integration_gates(contract)
+    )
+    errors.extend(contract_gate_errors)
+
     review_goals = report.get("review_goals")
     if not isinstance(review_goals, list) or not review_goals:
         errors.append("review_report.review_goals must be non-empty")
@@ -655,21 +674,6 @@ def validate_review_evidence(
         if not isinstance(integration_mappings, list) or not integration_mappings:
             errors.append("review_report.integration_gate_mapping must be non-empty")
         else:
-            expected_gates = contract.integration_gates
-            if not isinstance(expected_gates, list):
-                errors.append("contract.integration_gates must be a list")
-                expected_gates = []
-            expected_gate_names = set()
-            for expected_gate in expected_gates:
-                gate_name = (
-                    expected_gate.get("name")
-                    if isinstance(expected_gate, dict) else None
-                )
-                if not isinstance(gate_name, str) or not gate_name.strip():
-                    errors.append(
-                        "contract integration gate name must be a non-empty string")
-                    continue
-                expected_gate_names.add(gate_name)
             mapping_by_gate, gate_mapping_errors = _strict_mapping_by_key(
                 integration_mappings,
                 key_field="gate",

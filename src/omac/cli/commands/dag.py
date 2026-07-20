@@ -98,6 +98,7 @@ def register(parser):
     check.add_argument("--no-review", action="store_true", help="跳过 manifest review 阶段(仅 lint)")
     check.add_argument("--engine", help="引擎类型(multica|mock),缺省按 config.yaml / 环境变量 OMAC_ENGINE")
     check.add_argument("--workspace", help="工作空间 id,缺省按 config.yaml / 环境变量 OMAC_WORKSPACE_ID")
+    check.add_argument("--project", help="project id 覆盖(缺省读 config/env)")
     add_output_flag(check)
 
     show = sub.add_parser("show", help="查看 manifest 摘要")
@@ -108,6 +109,7 @@ def register(parser):
     run_p.add_argument("manifest", help="manifest 文件路径")
     run_p.add_argument("--engine", help="引擎类型覆盖(缺省读 config/env)")
     run_p.add_argument("--workspace", help="workspace 覆盖(缺省读 config/env)")
+    run_p.add_argument("--project", help="project id 覆盖(缺省读 config/env)")
     run_p.add_argument("--max-parallel", type=int, help="并发上限覆盖")
     run_p.add_argument("--max-rounds", type=int, help="最多跑 N 轮后退出(分段跑)")
     run_p.add_argument("--max-minutes", type=int, help="最多跑 N 分钟后退出(分段跑)")
@@ -118,6 +120,7 @@ def register(parser):
     status.add_argument("manifest", help="manifest 文件路径")
     status.add_argument("--engine", help="引擎类型覆盖(缺省读 config/env)")
     status.add_argument("--workspace", help="workspace 覆盖(缺省读 config/env)")
+    status.add_argument("--project", help="project id 覆盖(缺省读 config/env)")
     add_output_flag(status)
     _add_log_flags(status)
 
@@ -125,12 +128,13 @@ def register(parser):
     tick.add_argument("manifest", help="manifest 文件路径")
     tick.add_argument("--engine", help="引擎类型覆盖(缺省读 config/env)")
     tick.add_argument("--workspace", help="workspace 覆盖(缺省读 config/env)")
+    tick.add_argument("--project", help="project id 覆盖(缺省读 config/env)")
     add_output_flag(tick)
     _add_log_flags(tick)
 
 
 def _assemble_engine(args):
-    """config.yaml < OMAC_* env < --engine/--workspace → Engine。
+    """config.yaml < OMAC_* env < --engine/--workspace/--project → Engine。
 
     返回 (engine, engine_config)。报错即教学(§2)。
     """
@@ -203,6 +207,17 @@ def _effective_runtime_config(config: dict, engine_config: EngineConfig) -> dict
     return effective
 
 
+def _load_manifest_for_cli(path: str):
+    """Map manifest parse/schema failures to the stable validation exit path."""
+    try:
+        return load_manifest(path)
+    except (OSError, TypeError, ValueError, yaml.YAMLError) as exc:
+        raise ValidationError(ui(
+            f"Could not parse manifest {path}: {exc}. Fix the manifest and retry.",
+            f"无法解析 manifest {path}: {exc}。请修复后重试。",
+        )) from exc
+
+
 def check(args) -> int:
     path = args.manifest
     if not os.path.exists(path):
@@ -210,7 +225,7 @@ def check(args) -> int:
             f"Manifest file not found: {path}. Check the path or run `omac plan create` first.",
             f"manifest 文件不存在: {path} —— 请确认路径或先 `omac plan create`"))
 
-    manifest = load_manifest(path)
+    manifest = _load_manifest_for_cli(path)
     name = manifest.meta.get("name") or os.path.basename(path)
 
     engine, _ = _assemble_engine(args)
@@ -334,7 +349,7 @@ def show(args) -> int:
             f"Manifest file not found: {path}. Check the path.",
             f"manifest 文件不存在: {path} —— 请确认路径"))
 
-    manifest = load_manifest(path)
+    manifest = _load_manifest_for_cli(path)
     nodes = manifest.nodes
     total = len(nodes)
     with_contract = sum(
@@ -398,7 +413,7 @@ def status(args) -> int:
             f"  用 omac plan create --name <name> 生成,或检查路径"))
     engine, _ = _assemble_engine(args)
     config = _load_config_for_manifest(args.manifest)
-    manifest = load_manifest(args.manifest)
+    manifest = _load_manifest_for_cli(args.manifest)
     report = build_status_report(manifest, engine.store, args.manifest)
 
     if args.output == "json":
@@ -522,7 +537,7 @@ def _loop_or_single_locked(args, single_round: bool) -> int:
                          engine_type=engine.store.config.engine_type)
     config = _effective_runtime_config(load_config(config_path), engine_config)
     retry_limits = resolve_retry(config)
-    manifest = load_manifest(args.manifest)
+    manifest = _load_manifest_for_cli(args.manifest)
     _validate_execution_invariants(manifest, args.manifest)
     max_parallel = _default_max_parallel(args)
     max_rounds = getattr(args, "max_rounds", None)

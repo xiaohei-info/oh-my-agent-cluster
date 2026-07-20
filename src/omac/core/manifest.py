@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import fcntl
 import hashlib
 import os
+from pathlib import Path
 import re
 import stat
 import tempfile
@@ -75,6 +76,33 @@ def _dump_quality(quality):
     }
 
 
+_CONTRACT_LIST_FIELDS = (
+    "source_of_truth",
+    "required_contracts",
+    "acceptance",
+    "non_goals",
+    "verification_commands",
+    "integration_gates",
+    "scope_paths",
+)
+
+
+def _load_contract_list(raw: dict, field_name: str) -> list:
+    value = raw.get(field_name, [])
+    if not isinstance(value, list):
+        raise ValueError(f"contract.{field_name} must be a list")
+    return list(value)
+
+
+def _load_optional_contract_string(raw: dict, field_name: str):
+    if field_name not in raw:
+        return None
+    value = raw[field_name]
+    if not isinstance(value, str):
+        raise ValueError(f"contract.{field_name} must be a string")
+    return value
+
+
 @dataclass
 class Contract:
     objective: str | None = None
@@ -100,18 +128,24 @@ class Contract:
 def _load_contract(raw):
     if raw is None:
         return None
+    if not isinstance(raw, dict):
+        raise ValueError("contract must be an object")
+    list_fields = {
+        field_name: _load_contract_list(raw, field_name)
+        for field_name in _CONTRACT_LIST_FIELDS
+    }
     return Contract(
-        objective=raw.get("objective"),
-        source_of_truth=list(raw.get("source_of_truth", [])),
-        required_contracts=list(raw.get("required_contracts", [])),
-        acceptance=list(raw.get("acceptance", [])),
-        non_goals=list(raw.get("non_goals", [])),
-        verification_commands=list(raw.get("verification_commands", [])),
-        integration_gates=list(raw.get("integration_gates", [])),
-        pr_base=raw.get("pr_base"),
+        objective=_load_optional_contract_string(raw, "objective"),
+        source_of_truth=list_fields["source_of_truth"],
+        required_contracts=list_fields["required_contracts"],
+        acceptance=list_fields["acceptance"],
+        non_goals=list_fields["non_goals"],
+        verification_commands=list_fields["verification_commands"],
+        integration_gates=list_fields["integration_gates"],
+        pr_base=_load_optional_contract_string(raw, "pr_base"),
         coverage_gate=raw.get("coverage_gate", 90),
         acceptance_doc=raw.get("acceptance_doc"),
-        scope_paths=list(raw.get("scope_paths", [])),
+        scope_paths=list_fields["scope_paths"],
         quality=_load_quality(raw.get("quality")),
     )
 
@@ -120,13 +154,15 @@ def _dump_contract(contract):
     if contract is None:
         return None
     data = {
-        "objective": contract.objective,
         "acceptance": list(contract.acceptance),
         "non_goals": list(contract.non_goals),
         "verification_commands": list(contract.verification_commands),
         "integration_gates": list(contract.integration_gates),
-        "pr_base": contract.pr_base,
     }
+    if contract.objective is not None:
+        data["objective"] = contract.objective
+    if contract.pr_base is not None:
+        data["pr_base"] = contract.pr_base
     if contract.source_of_truth:
         data["source_of_truth"] = list(contract.source_of_truth)
     if contract.required_contracts:
@@ -165,6 +201,12 @@ class Node:
 class Manifest:
     meta: dict
     nodes: dict  # id -> Node
+    project_root: str | None = None
+
+
+def project_root_from_manifest_path(manifest_path: str) -> str:
+    parent = Path(manifest_path).resolve().parent
+    return str(parent.parent if parent.name == ".omac" else parent)
 
 def _build_nodes(raw) -> dict:
     """从已展开的 raw dict 构造 {id: Node}(共享于文件加载与不落盘文本解析)。"""
@@ -196,15 +238,25 @@ def load_manifest(path: str) -> Manifest:
     """从文件路径加载 manifest(环境变量展开 + schema 校验)。"""
     with open(path) as f:
         raw = _expand_env(yaml.safe_load(f))
-    return Manifest(meta=raw.get("meta", {}), nodes=_build_nodes(raw))
+    return Manifest(
+        meta=raw.get("meta", {}),
+        nodes=_build_nodes(raw),
+        project_root=project_root_from_manifest_path(path),
+    )
 
 
-def loads_manifest(text: str) -> Manifest:
+def loads_manifest(text: str, *, project_root: str | None = None) -> Manifest:
     """从 YAML 文本解析 manifest(不落盘,供 pipeline 直接消费 LLM 产出的 manifest)。"""
     raw = _expand_env(yaml.safe_load(text))
     if not isinstance(raw, dict):
         raise ValueError("manifest must be an object")
-    return Manifest(meta=raw.get("meta", {}), nodes=_build_nodes(raw))
+    return Manifest(
+        meta=raw.get("meta", {}),
+        nodes=_build_nodes(raw),
+        project_root=(
+            str(Path(project_root).resolve()) if project_root is not None else None
+        ),
+    )
 
 def save_manifest(manifest: Manifest, path: str):
     """把 manifest 原子序列化回 YAML。

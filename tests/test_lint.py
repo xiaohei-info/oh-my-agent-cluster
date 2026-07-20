@@ -1,4 +1,6 @@
 """core.lint:成员池、依赖引用、reviewer 规则、contract 硬门、环检测。"""
+import pytest
+
 from omac.core.lint import lint
 from omac.core.acceptance import load_acceptance_doc
 from omac.core.manifest import Contract, Manifest, Node
@@ -134,6 +136,56 @@ def test_valid_contract_passes_all_gates():
     """回归:补全 source_of_truth 的完整契约应零报错(硬门不误伤合法节点)。"""
     errs = lint(_manifest(_node("a", contract=_valid_contract())), POOL)
     assert errs == []
+
+
+def test_contract_rejects_duplicate_integration_gate_names():
+    contract = _valid_contract()
+    contract.integration_gates.append(dict(contract.integration_gates[0]))
+
+    errs = lint(_manifest(_node("a", contract=contract)), POOL)
+
+    assert any("duplicate integration gate name: g1" in error for error in errs)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("objective", ["实现 X"]),
+        ("objective", "   "),
+        ("pr_base", ["feature/v1"]),
+        ("pr_base", ""),
+    ],
+)
+def test_contract_scalar_fields_must_be_non_empty_strings(field, value):
+    contract = _valid_contract(**{field: value})
+
+    errs = lint(_manifest(_node("a", contract=contract)), POOL)
+
+    assert any(
+        f"contract.{field} must be a non-empty string" in error
+        for error in errs
+    )
+
+
+def test_required_contracts_resolve_from_manifest_project_root(
+    tmp_path, monkeypatch,
+):
+    project_root = tmp_path / "project"
+    required_contract = project_root / "contracts" / "shared.md"
+    required_contract.parent.mkdir(parents=True)
+    required_contract.write_text("# shared contract\n")
+    unrelated_cwd = tmp_path / "elsewhere"
+    unrelated_cwd.mkdir()
+    monkeypatch.chdir(unrelated_cwd)
+
+    contract = _valid_contract(required_contracts=["contracts/shared.md"])
+    manifest = Manifest(
+        meta={},
+        nodes={"a": _node("a", contract=contract)},
+        project_root=str(project_root),
+    )
+
+    assert lint(manifest, POOL) == []
 
 
 def test_quality_requires_every_outcome_to_have_business_test():

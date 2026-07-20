@@ -54,15 +54,15 @@ def _integration_gate_errors(prefix: str, gate, index: int) -> list:
     return errs
 
 
-def contract_errors(node) -> list:
+def contract_errors(node, *, project_root: str | None = None) -> list:
     contract = getattr(node, "contract", None)
     if contract is None:
         return [f"node {node.id}: contract is required"]
 
     errs = []
     prefix = f"node {node.id}: contract"
-    if not contract.objective:
-        errs.append(f"{prefix}.objective is required")
+    if not isinstance(contract.objective, str) or not contract.objective.strip():
+        errs.append(f"{prefix}.objective must be a non-empty string")
     for field in (
         "acceptance", "source_of_truth", "non_goals", "verification_commands",
     ):
@@ -71,10 +71,18 @@ def contract_errors(node) -> list:
     if not isinstance(contract.integration_gates, list) or not contract.integration_gates:
         errs.append(f"{prefix}.integration_gates must be non-empty")
     else:
+        gate_names = set()
         for index, gate in enumerate(contract.integration_gates):
             errs.extend(_integration_gate_errors(prefix, gate, index))
-    if not contract.pr_base:
-        errs.append(f"{prefix}.pr_base is required")
+            gate_name = gate.get("name") if isinstance(gate, dict) else None
+            if not isinstance(gate_name, str) or not gate_name.strip():
+                continue
+            if gate_name in gate_names:
+                errs.append(f"{prefix} duplicate integration gate name: {gate_name}")
+            else:
+                gate_names.add(gate_name)
+    if not isinstance(contract.pr_base, str) or not contract.pr_base.strip():
+        errs.append(f"{prefix}.pr_base must be a non-empty string")
     errs.extend(_quality_errors(prefix, contract))
 
     coverage_gate = contract.coverage_gate
@@ -88,7 +96,16 @@ def contract_errors(node) -> list:
         errs.append(f"{prefix}.required_contracts must be strings")
         required_contracts = []
     for required_path in required_contracts:
-        if not os.path.exists(required_path):
+        resolved_path = required_path
+        if not os.path.isabs(required_path):
+            if project_root is None:
+                errs.append(
+                    f"{prefix}.required_contracts relative path requires "
+                    f"manifest project root: {required_path}"
+                )
+                continue
+            resolved_path = os.path.join(project_root, required_path)
+        if not os.path.exists(resolved_path):
             errs.append(f"{prefix}.required_contracts path does not exist: {required_path}")
     return errs
 
@@ -225,7 +242,8 @@ def lint(m: Manifest, pool: set, *, acceptance=None) -> list:
             errs.append(f"node {n.id}: reviewer must differ from worker")
         elif n.reviewer not in pool:
             errs.append(f"node {n.id}: reviewer '{n.reviewer}' not in agent pool")
-        errs.extend(contract_errors(n))
+        errs.extend(contract_errors(
+            n, project_root=getattr(m, "project_root", None)))
     if acceptance is not None:
         flow_ids = set(getattr(acceptance, "flow_ids", None) or [])
         action_ids = set(getattr(acceptance, "action_ids", None) or [])
@@ -295,7 +313,11 @@ def lint_increment(increment: Manifest, existing: Manifest, pool: set) -> list:
             errs.append(f"node {n.id}: reviewer must differ from worker")
         elif n.reviewer not in pool:
             errs.append(f"node {n.id}: reviewer {n.reviewer!r} not in agent pool")
-        errs.extend(contract_errors(n))
+        project_root = (
+            getattr(increment, "project_root", None)
+            or getattr(existing, "project_root", None)
+        )
+        errs.extend(contract_errors(n, project_root=project_root))
 
     combined_nodes = dict(existing.nodes)
     combined_nodes.update(increment.nodes)

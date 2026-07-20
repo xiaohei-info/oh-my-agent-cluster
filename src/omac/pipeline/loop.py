@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
 
 from ..core import graph, logsetup
@@ -15,7 +14,9 @@ from ..core.config import DEFAULT_RETRY
 from ..core.evidence import validate_review_evidence, validate_worker_evidence
 from ..core.gitsync import commit_manifest
 from ..core.lint import contract_errors
-from ..core.manifest import Manifest, save_manifest, set_node
+from ..core.manifest import (
+    Manifest, project_root_from_manifest_path, save_manifest, set_node,
+)
 from ..pipeline.delivery import advance_delivery, run_merge_delivery
 from ..engines.models import WorkItemStatus
 from ..engines.runtime import AgentRuntime
@@ -46,13 +47,6 @@ _PLATFORM_TO_MANIFEST: Dict[str, str] = {
     "failed": "failed",
     "blocked": "blocked",
 }
-
-
-def _project_root_from_manifest_path(manifest_path: str) -> str:
-    parent = Path(manifest_path).resolve().parent
-    if parent.name == ".omac":
-        return str(parent.parent)
-    return str(parent)
 
 
 def _store_env(store: WorkItemStore) -> dict:
@@ -115,7 +109,10 @@ def _block_invalid_develop_nodes(
         if node.status == "abandoned":
             continue
         reason = None
-        invalid_contract = contract_errors(node)
+        invalid_contract = contract_errors(
+            node,
+            project_root=project_root_from_manifest_path(manifest_path),
+        )
         if invalid_contract:
             reason = ui(
                 "Develop node contract is invalid:\n  - "
@@ -403,7 +400,7 @@ def collect_results(
                 # 'bounce' 已转回 worker(本 tick 不再推进), 'blocked' 则阻止后续。
                 ci_action = advance_delivery(
                     config or {}, manifest, key, store, runtime, limits,
-                    project_root=_project_root_from_manifest_path(manifest_path))
+                    project_root=project_root_from_manifest_path(manifest_path))
                 if ci_action == "bounce":
                     failures[key] = ui(
                         "CI failed; returned to the worker for resubmission.",

@@ -13,8 +13,8 @@ from typing import Any, Dict, List, Optional
 
 from ..core.taskmeta import Bounces, TaskKind, TaskPhase
 from .models import (
-    EngineConfig, ProjectInfo, PullRequestSnapshot, WorkItem, WorkItemStatus,
-    WorkspaceInfo,
+    DeliveryCommandResult, EngineConfig, ProjectInfo, PullRequestSnapshot,
+    WorkItem, WorkItemStatus, WorkspaceInfo,
 )
 
 
@@ -79,6 +79,29 @@ class WorkItemStore(ABC):
     @abstractmethod
     def inspect_pull_request(self, pr_url: str) -> PullRequestSnapshot:
         """返回 PR 当前 draft/state/head revision；平台调用封装在 adapter 内。"""
+
+    @abstractmethod
+    def run_ci_check(
+        self,
+        pr_url: str,
+        command: str,
+        timeout_minutes: int,
+    ) -> DeliveryCommandResult:
+        """执行 PR CI 门。
+
+        真实检查失败返回 ``FAILED``；超时返回 ``TIMED_OUT``；认证或平台错误抛
+        ``AuthError`` / ``PlatformError``，不得降级成普通失败。
+        """
+
+    @abstractmethod
+    def merge_pull_request(
+        self,
+        pr_url: str,
+        delivered_revision: str,
+        command: str,
+        timeout_minutes: int,
+    ) -> DeliveryCommandResult:
+        """以 delivered revision 锁执行 PR merge，错误语义同 ``run_ci_check``。"""
 
     # ==================== 工作单元 CRUD ====================
 

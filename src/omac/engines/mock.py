@@ -7,6 +7,7 @@ assign 后按延迟自动模拟完成/失败/评审通过,
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 import time
 import json
@@ -17,8 +18,9 @@ from ..core.taskmeta import DELIVERY_CONTENT_KEY, Bounces, TaskKind, TaskPhase
 from ..errors import ValidationError
 from ..i18n import ui
 from .models import (
-    AgentInfo, AgentProvisionSpec, EngineConfig, ProjectInfo, RuntimeTarget,
-    PullRequestSnapshot, WorkItem, WorkItemStatus, WorkspaceInfo,
+    AgentInfo, AgentProvisionSpec, DeliveryCommandOutcome,
+    DeliveryCommandResult, EngineConfig, ProjectInfo, PullRequestSnapshot,
+    RuntimeTarget, WorkItem, WorkItemStatus, WorkspaceInfo,
 )
 from .runtime import AgentRuntime
 from .store import WorkItemStore
@@ -55,6 +57,54 @@ _shared_human_confirmed: set = set()
 # 产出后进入评审阶段(而非直接 DONE)的 kind:与真实 work submit 的产出终态一致。
 # develop 走 pr_url→DONE;final-acceptance 有独立的 _accepted_results 真实 submit 分支。
 _AUTHORING_TO_REVIEW = (TaskKind.PLAN, TaskKind.ACCEPTANCE, TaskKind.DECOMPOSE)
+
+
+def _tail(text: str, limit: int = 2000) -> str:
+    text = text.rstrip()
+    if len(text) <= limit:
+        return text
+    return "..." + text[-limit:]
+
+
+def _timeout_output(exc: subprocess.TimeoutExpired) -> str:
+    output = ""
+    for stream in (exc.stdout, exc.stderr):
+        if isinstance(stream, bytes):
+            output += stream.decode("utf-8", errors="replace")
+        elif isinstance(stream, str):
+            output += stream
+    return output
+
+
+def _run_delivery_command(command: str, timeout_minutes: int) -> DeliveryCommandResult:
+    try:
+        proc = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=max(1, int(timeout_minutes)) * 60,
+        )
+    except subprocess.TimeoutExpired as exc:
+        output = _timeout_output(exc)
+        return DeliveryCommandResult(
+            outcome=DeliveryCommandOutcome.TIMED_OUT,
+            exit_code=None,
+            output=output,
+            summary=_tail(output) or ui("(no output)", "(无输出)"),
+        )
+    output = (proc.stdout or "") + (proc.stderr or "")
+    outcome = (
+        DeliveryCommandOutcome.PASSED
+        if proc.returncode == 0
+        else DeliveryCommandOutcome.FAILED
+    )
+    return DeliveryCommandResult(
+        outcome=outcome,
+        exit_code=proc.returncode,
+        output=output,
+        summary=_tail(output) or ui("(no output)", "(无输出)"),
+    )
 
 
 def _init_default_workspace():
@@ -565,6 +615,25 @@ class MockStore(WorkItemStore):
             state=str(extra.get("MOCK_PR_STATE", "OPEN")),
             head_revision=head_revision,
         )
+
+    def run_ci_check(
+        self, pr_url: str, command: str, timeout_minutes: int,
+    ) -> DeliveryCommandResult:
+        return _run_delivery_command(
+            command.replace("{pr_url}", pr_url), timeout_minutes)
+
+    def merge_pull_request(
+        self,
+        pr_url: str,
+        delivered_revision: str,
+        command: str,
+        timeout_minutes: int,
+    ) -> DeliveryCommandResult:
+        rendered = (
+            command.replace("{pr_url}", pr_url)
+            .replace("{delivered_revision}", delivered_revision)
+        )
+        return _run_delivery_command(rendered, timeout_minutes)
 
     # ==================== 工作空间发现 ====================
 

@@ -30,8 +30,9 @@ from ..core.taskmeta import (
 from ..errors import AuthError, PlatformError, ValidationError
 from ..i18n import ui
 from .models import (
-    AgentInfo, AgentProvisionSpec, EngineConfig, ProjectInfo, RuntimeTarget,
-    PullRequestSnapshot, SkillPackage, WorkItem, WorkItemStatus, WorkspaceInfo,
+    AgentInfo, AgentProvisionSpec, DeliveryCommandOutcome,
+    DeliveryCommandResult, EngineConfig, ProjectInfo, PullRequestSnapshot,
+    RuntimeTarget, SkillPackage, WorkItem, WorkItemStatus, WorkspaceInfo,
 )
 from .metadata_policy import assert_metadata_write_allowed, parse_payload_text
 from .runtime import AgentRuntime
@@ -55,6 +56,49 @@ def _latest_run(runs: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 def _latest_direct_run(runs: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     direct_runs = [run for run in runs if (run.get("kind") or "direct") == "direct"]
     return _latest_run(direct_runs)
+
+
+_GH_AUTH_MARKERS = (
+    "gh auth login",
+    "not logged into",
+    "authentication failed",
+    "authentication required",
+    "bad credentials",
+    "http 401",
+    "status 401",
+)
+
+_GH_PLATFORM_MARKERS = (
+    "network unavailable",
+    "could not resolve host",
+    "connection refused",
+    "connection reset",
+    "api.github.com",
+    "rate limit",
+    "http 5",
+    "status 5",
+)
+
+
+def _tail(text: str, limit: int = 2000) -> str:
+    text = text.rstrip()
+    if len(text) <= limit:
+        return text
+    return "..." + text[-limit:]
+
+
+def _timeout_output(exc: subprocess.TimeoutExpired) -> str:
+    output = ""
+    for stream in (exc.stdout, exc.stderr):
+        if isinstance(stream, bytes):
+            output += stream.decode("utf-8", errors="replace")
+        elif isinstance(stream, str):
+            output += stream
+    return output
+
+
+def _is_gh_command(command: str) -> bool:
+    return command.lstrip().startswith("gh ")
 
 
 class MulticaStore(WorkItemStore):
@@ -103,12 +147,9 @@ class MulticaStore(WorkItemStore):
                 f"GitHub PR 检查超时: {pr_url}。请确认网络/GitHub 可达后重试。"))
         if proc.returncode != 0:
             detail = (proc.stderr or proc.stdout or "").strip()
-            auth_markers = (
-                "gh auth login", "not logged into", "authentication failed",
-                "bad credentials", "http 401", "status 401",
-            )
-            error_type = AuthError if any(
-                marker in detail.lower() for marker in auth_markers
+            error_type = AuthError if (
+                proc.returncode == 4
+                or any(marker in detail.lower() for marker in _GH_AUTH_MARKERS)
             ) else PlatformError
             raise error_type(ui(
                 f"GitHub PR check failed: {pr_url}\n{detail}",
@@ -121,6 +162,10 @@ class MulticaStore(WorkItemStore):
                 f"{(proc.stdout or '').strip()}",
                 f"GitHub PR 检查返回非 JSON: {pr_url}\n"
                 f"{(proc.stdout or '').strip()}"))
+        if not isinstance(payload, dict):
+            raise PlatformError(ui(
+                f"GitHub PR check must return a JSON object: {pr_url}",
+                f"GitHub PR 检查必须返回 JSON object: {pr_url}"))
         head_revision = payload.get("headRefOid")
         if not isinstance(head_revision, str) or not head_revision.strip():
             raise PlatformError(ui(
@@ -137,6 +182,97 @@ class MulticaStore(WorkItemStore):
             state=str(payload.get("state") or ""),
             head_revision=head_revision,
         )
+
+    def _run_pull_request_command(
+        self,
+        command: str,
+        timeout_minutes: int,
+        operation: str,
+    ) -> DeliveryCommandResult:
+        try:
+            proc = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=max(1, int(timeout_minutes)) * 60,
+            )
+        except FileNotFoundError as exc:
+            raise PlatformError(ui(
+                f"{operation} command is unavailable: {exc}",
+                f"{operation} 命令不可用: {exc}")) from exc
+        except subprocess.TimeoutExpired as exc:
+            output = _timeout_output(exc)
+            return DeliveryCommandResult(
+                outcome=DeliveryCommandOutcome.TIMED_OUT,
+                exit_code=None,
+                output=output,
+                summary=_tail(output) or ui("(no output)", "(无输出)"),
+            )
+
+        output = (proc.stdout or "") + (proc.stderr or "")
+        detail = output.strip()
+        if proc.returncode == 0:
+            return DeliveryCommandResult(
+                outcome=DeliveryCommandOutcome.PASSED,
+                exit_code=0,
+                output=output,
+                summary=_tail(output) or ui("(no output)", "(无输出)"),
+            )
+
+        lowered = detail.lower()
+        is_gh = _is_gh_command(command)
+        if is_gh and (
+            proc.returncode == 4
+            or any(marker in lowered for marker in _GH_AUTH_MARKERS)
+        ):
+            raise AuthError(ui(
+                f"{operation} authentication failed; run `gh auth login`: {detail}",
+                f"{operation} 认证失败，请先运行 `gh auth login`: {detail}"))
+        if is_gh and (
+            proc.returncode in {126, 127}
+            or any(marker in lowered for marker in _GH_PLATFORM_MARKERS)
+        ):
+            raise PlatformError(ui(
+                f"{operation} platform call failed: {detail}",
+                f"{operation} 平台调用失败: {detail}"))
+        return DeliveryCommandResult(
+            outcome=DeliveryCommandOutcome.FAILED,
+            exit_code=proc.returncode,
+            output=output,
+            summary=_tail(output) or ui("(no output)", "(无输出)"),
+        )
+
+    def run_ci_check(
+        self, pr_url: str, command: str, timeout_minutes: int,
+    ) -> DeliveryCommandResult:
+        try:
+            canonical_url = canonical_github_pr_url(pr_url)
+        except ValueError as exc:
+            raise ValidationError(ui(
+                f"Invalid GitHub PR URL for CI: {exc}",
+                f"CI 使用的 GitHub PR URL 非法: {exc}")) from exc
+        rendered = command.replace("{pr_url}", canonical_url)
+        return self._run_pull_request_command(rendered, timeout_minutes, "GitHub CI check")
+
+    def merge_pull_request(
+        self,
+        pr_url: str,
+        delivered_revision: str,
+        command: str,
+        timeout_minutes: int,
+    ) -> DeliveryCommandResult:
+        try:
+            canonical_url = canonical_github_pr_url(pr_url)
+        except ValueError as exc:
+            raise ValidationError(ui(
+                f"Invalid GitHub PR URL for merge: {exc}",
+                f"merge 使用的 GitHub PR URL 非法: {exc}")) from exc
+        rendered = (
+            command.replace("{pr_url}", canonical_url)
+            .replace("{delivered_revision}", delivered_revision)
+        )
+        return self._run_pull_request_command(rendered, timeout_minutes, "GitHub merge")
 
     # ==================== 内部工具 ====================
 
@@ -875,10 +1011,7 @@ class MulticaRuntime(AgentRuntime):
     def wake(self, item_id: str, agent: str, role: str) -> None:
         if self._store._consume_assignment_wake_pending(item_id):
             return None
-        try:
-            runs = self._store._run_multica(["issue", "runs", item_id, "--output", "json"])
-        except PlatformError:
-            return None
+        runs = self._store._run_multica(["issue", "runs", item_id, "--output", "json"])
         latest = _latest_direct_run(runs if isinstance(runs, list) else [])
         if latest:
             status = (latest.get("status") or "").lower()

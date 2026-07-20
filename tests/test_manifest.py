@@ -185,6 +185,14 @@ def test_load_manifest_records_dot_omac_project_root(tmp_path):
     assert manifest.project_root == str(project_root.resolve())
 
 
+@pytest.mark.parametrize("content", ["", "null\n", "[]\n"])
+def test_load_manifest_rejects_non_mapping_top_level(tmp_path, content):
+    path = _write(tmp_path, content)
+
+    with pytest.raises(ValueError, match="manifest must be an object"):
+        load_manifest(path)
+
+
 def test_env_expansion(tmp_path, monkeypatch):
     content = "meta:\n  ws: \"${OMAC_TEST_WS:-fallback}\"\nnodes: []\n"
     path = _write(tmp_path, content)

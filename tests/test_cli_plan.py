@@ -452,6 +452,15 @@ nodes:
 """
 
 
+def _manifest_with_required_contract(path: str) -> str:
+    return GOOD_MANIFEST.replace(
+        '      source_of_truth: ["docs/login.md"]\n',
+        '      source_of_truth: ["docs/login.md"]\n'
+        f'      required_contracts: ["{path}"]\n',
+        1,
+    )
+
+
 def _configure_create_mock(tmp_path, monkeypatch):
     """完整 mock 配置:planner/orchestrator/workers/reviewers 角色齐全。"""
     from omac.core.taskmeta import TaskKind
@@ -796,3 +805,61 @@ def test_create_lint_reject_revises_then_passes(tmp_path, monkeypatch):
         [{"manifest": BAD_MANIFEST_LINT}, {"manifest": GOOD_MANIFEST}])
     assert main(["plan", "create", "--name", "demo-lint"]) == exit_codes.OK
     assert (tmp_path / ".omac" / "demo-lint.yaml").exists()
+
+
+def test_create_guard_resolves_required_contract_from_project_root(
+        tmp_path, monkeypatch):
+    _configure_create_mock(tmp_path, monkeypatch)
+    (tmp_path / "README.md").write_text("# Project contract\n")
+    MockStore.set_kind_delivery(
+        "decompose", {"manifest": _manifest_with_required_contract("README.md")})
+
+    assert main([
+        "plan", "create", "--name", "demo-required-contract",
+    ]) == exit_codes.OK
+
+
+@pytest.mark.parametrize(
+    ("invalid_manifest", "error_fragment"),
+    [
+        (
+            "meta:\n  name: broken\nnodes:\n  - id: login\n    contract: [",
+            "YAML or schema",
+        ),
+        (
+            GOOD_MANIFEST.replace(
+                "      acceptance:\n        - flow-login\n",
+                "      acceptance: flow-login\n",
+                1,
+            ),
+            "contract.acceptance must be a list",
+        ),
+    ],
+    ids=("yaml-parser-error", "contract-type-error"),
+)
+def test_create_guard_revises_manifest_parse_errors_then_passes(
+        tmp_path, monkeypatch, invalid_manifest, error_fragment):
+    from omac.core.taskmeta import TaskKind
+
+    engine = _configure_create_mock(tmp_path, monkeypatch)
+    MockStore.set_kind_delivery_sequence(
+        "decompose",
+        [{"manifest": invalid_manifest}, {"manifest": GOOD_MANIFEST}],
+    )
+
+    assert main([
+        "plan", "create", "--name", "demo-parse-revision",
+    ]) == exit_codes.OK
+    decompose_item = _first_item_of_kind(engine, TaskKind.DECOMPOSE)
+    comments = "\n".join(engine.store.get_comments(decompose_item.id))
+    assert "generated manifest" in comments
+    assert error_fragment in comments
+
+
+@pytest.mark.parametrize("content", ["", "null\n", "[]\n"])
+def test_dag_show_non_mapping_manifest_exits_validation(
+        tmp_path, capsys, content):
+    path = _write(tmp_path, content)
+
+    assert main(["dag", "show", path]) == exit_codes.VALIDATION
+    assert "manifest must be an object" in capsys.readouterr().err

@@ -23,6 +23,7 @@ import os
 import re
 import shlex
 import time
+import yaml
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
@@ -30,7 +31,12 @@ from ..core import acceptance as acceptance_mod
 from ..core.config import CONFIG_DIR, CONFIG_PATH
 from ..core.gitsync import commit_files, ensure_config_synced, ensure_files_clean
 from ..core.lint import lint
-from ..core.manifest import Manifest, loads_manifest, save_manifest
+from ..core.manifest import (
+    Manifest,
+    loads_manifest,
+    project_root_from_manifest_path,
+    save_manifest,
+)
 from ..core.project_rules import read_agents_snapshot, write_project_rules
 from ..core.taskmeta import TaskKind, make_dag_key, make_plan_id
 from ..engines.models import WorkItem, WorkItemStatus
@@ -174,6 +180,8 @@ def _name_from_plan_issue(item: WorkItem) -> str:
 
 def _compose_guard(
     members: set,
+    *,
+    project_root: str,
     acceptance_doc: Optional[acceptance_mod.AcceptanceDoc] = None,
 ) -> Callable[[WorkItem], List[str]]:
     """造 decompose 的 lint 机器门(零 token,≤ max_revisions 轮)。
@@ -189,7 +197,15 @@ def _compose_guard(
             return [ui(
                 f"Delivery is missing '{_MANIFEST_KEY}'; the orchestrator did not submit a manifest.",
                 f"交付缺少 '{_MANIFEST_KEY}' —— orchestrator 未产出 manifest")]
-        manifest = loads_manifest(text)
+        try:
+            manifest = loads_manifest(text, project_root=project_root)
+        except (TypeError, ValueError, yaml.YAMLError) as exc:
+            return [ui(
+                f"Could not parse generated manifest YAML or schema: {exc}. "
+                "Regenerate a YAML mapping with valid meta, nodes, and contract field types.",
+                f"无法解析生成的 manifest YAML 或 schema: {exc}。"
+                "请重新生成顶层为 mapping、且 meta、nodes、contract 字段类型有效的 YAML。",
+            )]
         return lint(manifest, members, acceptance=acceptance_doc)
 
     return guard
@@ -215,6 +231,7 @@ def plan_create(
         ensure_files_clean(["AGENTS.md"], engine_type=store.config.engine_type)
     base_dir = CONFIG_DIR
     manifest_path = os.path.join(base_dir, f"{name}.yaml")
+    project_root = project_root_from_manifest_path(manifest_path)
     acceptance_path = os.path.join(base_dir, f"{name}.acceptance.yaml")
     reviewers = [] if ctx.no_review else ctx.reviewers
     poll_cb = poll if poll is not None else ctx.poll()
@@ -287,7 +304,11 @@ def plan_create(
     decompose_inputs = {"plan": plan_text}
     if acceptance_text is not None:
         decompose_inputs["acceptance"] = acceptance_text
-    guard = _compose_guard(ctx.members, acceptance_doc=acceptance_doc)
+    guard = _compose_guard(
+        ctx.members,
+        project_root=project_root,
+        acceptance_doc=acceptance_doc,
+    )
     res = run_task(
         ctx.engine,
         TaskKind.DECOMPOSE,
@@ -309,7 +330,7 @@ def plan_create(
     # provenance:把塑造本 DAG 的源头 issue(设计/验收/拆解)记入 manifest meta,
     # 让 dag run 派发的 develop issue 也能溯源,防后续执行跑偏。
     source_issues = [r for r in [plan_item_id, acceptance_item_id, decompose_item_id] if r]
-    manifest = loads_manifest(manifest_text)
+    manifest = loads_manifest(manifest_text, project_root=project_root)
     manifest.meta["plan_id"] = plan_id
     manifest.meta.setdefault("name", name)
     manifest.meta["acceptance_required"] = not ctx.no_acceptance
@@ -374,6 +395,7 @@ def plan_resume(
         plan_item = store.get_work_item(plan_item.id)
     resolved_name = name or _name_from_plan_issue(plan_item)
     manifest_path = os.path.join(base_dir, f"{resolved_name}.yaml")
+    project_root = project_root_from_manifest_path(manifest_path)
     acceptance_path = os.path.join(base_dir, f"{resolved_name}.acceptance.yaml")
 
     res = run_task(
@@ -442,7 +464,11 @@ def plan_resume(
         reviewers=reviewers,
         max_revisions=ctx.max_revisions,
         poll=poll_cb,
-        guard=_compose_guard(ctx.members, acceptance_doc=acceptance_doc),
+        guard=_compose_guard(
+            ctx.members,
+            project_root=project_root,
+            acceptance_doc=acceptance_doc,
+        ),
         source_refs=[r for r in [plan_item_id, acceptance_item_id] if r],
         dag_key=decompose_key,
         resume_item_id=decompose_item.id if decompose_item else None,
@@ -452,7 +478,7 @@ def plan_resume(
     _write_if_missing(base_dir)
 
     source_issues = [r for r in [plan_item_id, acceptance_item_id, decompose_item_id] if r]
-    manifest = loads_manifest(manifest_text)
+    manifest = loads_manifest(manifest_text, project_root=project_root)
     manifest.meta["plan_id"] = plan_id_value
     manifest.meta.setdefault("name", resolved_name)
     manifest.meta["acceptance_required"] = not ctx.no_acceptance
